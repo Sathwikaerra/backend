@@ -4,6 +4,8 @@ const bool = (v, fallback) => (v === undefined || v === '' ? fallback : ['1', 't
 
 export const config = {
   port: Number(process.env.PORT) || 4000,
+  // Public address of the frontend, used in signing links. Empty: the browser's origin when it is a CORS origin.
+  appUrl: (process.env.APP_URL || '').replace(/\/$/, ''),
   corsOrigins: (process.env.CORS_ORIGIN || 'http://localhost:5173')
     .split(',')
     .map((s) => s.trim())

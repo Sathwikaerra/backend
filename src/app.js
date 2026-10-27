@@ -7,10 +7,13 @@ import authRoutes from './routes/auth.js'
 import workflowRoutes from './routes/workflows.js'
 import templateRoutes from './routes/templates.js'
 import contractRoutes from './routes/contracts.js'
+import signRoutes from './routes/sign.js'
 
 export function createApp() {
   const app = express()
   app.disable('x-powered-by')
+  // Requests arrive through the Vite proxy in development; trust it for the client IP
+  app.set('trust proxy', 'loopback')
   app.use(cors({ origin: config.corsOrigins }))
   // Templates can embed images, so allow larger JSON bodies than the default 100 KB
   app.use(express.json({ limit: '20mb' }))
@@ -29,6 +32,8 @@ export function createApp() {
   app.use('/api/workflows', requireAuth, workflowRoutes)
   app.use('/api/templates', requireAuth, templateRoutes)
   app.use('/api/contracts', requireAuth, contractRoutes)
+  // Signers open their emailed link without an account
+  app.use('/api/sign', signRoutes)
 
   app.use(notFoundRoute)
   app.use(errorHandler)

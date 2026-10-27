@@ -53,12 +53,29 @@ so no extra frontend configuration is needed. Check the connection at http://loc
 | `WorkflowFiles` | The contract PDF for each workflow (`VARBINARY(MAX)`) |
 | `WorkflowVersions` | A snapshot on every save, shown in "Version History" |
 | `Templates` | Word-style template document (HTML), page setup and signing setup |
-| `Contracts` | A workflow initiated for real signers; "expired" is computed from `ExpiresAt` |
-| `ContractSigners` | Each signer of a contract, in signing order, with signed status |
+| `Contracts` | A workflow initiated for real signers, with a snapshot of its signers and boxes; "expired" is computed from `ExpiresAt` |
+| `ContractSigners` | Each signer, in signing order: link token hash, invited / viewed / signed / declined times, signature image, IP |
+| `ContractDocuments` | The PDF the signers saw (`original`) and the final PDF with signatures and certificate (`signed`) |
+| `ContractEvents` | Audit trail (created, invited, viewed, signed, declined, completed, cancelled) |
+| `EmailOtps` | One-time login / signup codes (hashed), deleted once used |
+
+Existing databases: run `npm run db:migrate` to apply [`sql/migrations`](sql/migrations) (safe to re-run).
+
+## Signing flow
+
+1. **Initiate** (`POST /api/contracts`): the workflow's PDF, signers and boxes are copied into the contract,
+   so later workflow edits never change it. The first signer (sequential) or every signer (parallel) is emailed a private link.
+2. **Sign** (public page `/sign/<token>`, no account needed): the signer reviews the PDF, draws or types a signature,
+   agrees, and finishes. The next signer is then invited automatically.
+3. **Complete**: when the last signer signs, the signatures are stamped into their boxes, a certificate of completion
+   (signers, times, IPs, document SHA-256, audit trail) is appended, and the signed PDF is emailed to everyone.
+
+Only a SHA-256 hash of each link token is stored. "Resend link" issues a new link and the old one stops working.
+Links point to `APP_URL` if set, otherwise to the frontend the request came from (when it is in `CORS_ORIGIN`).
 
 ## API
 
-All routes except signup, login and health need `Authorization: Bearer <token>` (returned by login).
+All routes except auth, health and `/api/sign/*` need `Authorization: Bearer <token>` (returned by login).
 Errors are returned as `{ "error": "message" }` with a matching HTTP status.
 
 | Method | Path | Body / query | Returns |
@@ -81,7 +98,14 @@ Errors are returned as `{ "error": "message" }` with a matching HTTP status.
 | PUT | `/api/templates/:id` | template JSON | template |
 | DELETE | `/api/templates/:id` | | 204 |
 | GET | `/api/contracts` | `?from=&to=` (optional dates) | contracts with signers |
-| POST | `/api/contracts` | `{ workflowId, signers: [{ name, email }] }` | contract (201) |
-| POST | `/api/contracts/:id/signers/:order/sign` | | contract (marks completed when all signed) |
+| POST | `/api/contracts` | `{ workflowId, signers: [{ name, email }] }` | contract + `invites` (201); emails the first link(s) |
+| GET | `/api/contracts/:id` | | contract with signers, `events`, `documents` |
+| GET | `/api/contracts/:id/document` | `?kind=original\|signed` | the PDF (signed once completed) |
+| POST | `/api/contracts/:id/signers/:order/resend` | | `{ link, emailed, error }`; the old link stops working |
+| POST | `/api/contracts/:id/cancel` | | contract |
+| GET | `/api/sign/:token` | | what the signer sees: contract, their boxes, progress (public) |
+| GET | `/api/sign/:token/document` | | the PDF (public) |
+| POST | `/api/sign/:token/sign` | `{ signature: PNG data URL, type: draw\|type, consent: true }` | updated view (public) |
+| POST | `/api/sign/:token/decline` | `{ reason }` | updated view (public) |
 
 Every query is parameterised and filtered by the signed-in user's organisation.
