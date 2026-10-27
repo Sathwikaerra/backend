@@ -11,8 +11,8 @@ async function loadContracts(where, params) {
   const rows = await query(
     `SELECT c.Id, c.WorkflowId, c.Name, c.WorkflowName, c.Estamping, c.SigningMethod, ${STATUS_SQL} AS Status,
             c.CreatedAt, c.ExpiresAt, c.CompletedAt, c.CancelledAt,
-            s.SignerOrder, s.Name AS SignerName, s.Email, s.Method, s.Signed, s.SignedAt,
-            s.InvitedAt, s.ViewedAt, s.DeclinedAt, s.DeclineReason
+            s.SignerOrder, s.Kind, s.Name AS SignerName, s.Email, s.Method, s.Signed, s.SignedAt,
+            s.InvitedAt, s.ViewedAt, s.DeclinedAt, s.DeclineReason, s.ReviewComment
      FROM ${t.Contracts} c
      LEFT JOIN ${t.ContractSigners} s ON s.ContractId = c.Id
      WHERE ${where}
@@ -39,8 +39,11 @@ async function loadContracts(where, params) {
       })
     }
     if (r.SignerOrder != null) {
+      // Reviewers are listed here too (kind 'reviewer'): "signed" means approved, "declined" means rejected
       byId.get(r.Id).signers.push({
         order: r.SignerOrder,
+        kind: r.Kind,
+        reviewComment: r.ReviewComment,
         name: r.SignerName,
         email: r.Email,
         method: r.Method,
@@ -78,7 +81,19 @@ router.get(
   }),
 )
 
-// POST /api/contracts  { workflowId, signers: [{ name, email }] }  -> creates the contract and emails the first invitation(s)
+// Checks the people entered for one kind of role; `label` is used in error messages
+function cleanPeople(list, roles, label) {
+  const people = Array.isArray(list) ? list : []
+  if (people.length !== roles.length) throw badRequest(`This workflow needs exactly ${roles.length} ${label}(s)`)
+  return people.map((p, i) => {
+    const email = requireString(p?.email, `Email of ${label} ${i + 1}`, { max: 320 }).toLowerCase()
+    if (!EMAIL_RE.test(email)) throw badRequest(`Enter a valid email for ${label} ${i + 1}`)
+    return { name: requireString(p?.name, `Name of ${label} ${i + 1}`), email, method: roles[i].methods?.[0] ?? null, roleId: String(roles[i].id) }
+  })
+}
+
+// POST /api/contracts  { workflowId, signers: [{ name, email }], reviewers?: [{ name, email }] }
+// -> creates the contract and emails the first invitation(s); reviewers go first
 router.post(
   '/',
   handle(async (req, res) => {
@@ -96,15 +111,10 @@ router.post(
 
     const basic = JSON.parse(wf.BasicJson)
     const participants = JSON.parse(wf.ParticipantsJson)
-    const roles = participants.filter((p) => p.kind === 'signer')
-    const signers = Array.isArray(req.body.signers) ? req.body.signers : []
-    if (signers.length !== roles.length) throw badRequest(`This workflow needs exactly ${roles.length} signer(s)`)
-    const clean = signers.map((s, i) => {
-      const email = requireString(s?.email, `Email of signer ${i + 1}`, { max: 320 }).toLowerCase()
-      if (!EMAIL_RE.test(email)) throw badRequest(`Enter a valid email for signer ${i + 1}`)
-      return { name: requireString(s?.name, `Name of signer ${i + 1}`), email, method: roles[i].methods?.[0] ?? null, roleId: String(roles[i].id) }
-    })
-    if (new Set(clean.map((s) => s.email)).size !== clean.length) throw badRequest('Each signer needs a different email address')
+    const reviewers = cleanPeople(req.body.reviewers, participants.filter((p) => p.kind === 'reviewer'), 'reviewer').map((r) => ({ ...r, method: null, kind: 'reviewer' }))
+    const signers = cleanPeople(req.body.signers, participants.filter((p) => p.kind === 'signer'), 'signer').map((s) => ({ ...s, kind: 'signer' }))
+    const clean = [...reviewers, ...signers]
+    if (new Set(clean.map((s) => s.email)).size !== clean.length) throw badRequest('Each reviewer and signer needs a different email address')
 
     const id = newId()
     const now = new Date()
@@ -140,8 +150,8 @@ router.post(
       )
       for (const [i, s] of clean.entries()) {
         await run(
-          `INSERT INTO ${t.ContractSigners} (ContractId, SignerOrder, RoleId, Name, Email, Method)
-           VALUES (@id, @order, @roleId, @name, @email, @method)`,
+          `INSERT INTO ${t.ContractSigners} (ContractId, SignerOrder, RoleId, Kind, Name, Email, Method)
+           VALUES (@id, @order, @roleId, @kind, @name, @email, @method)`,
           { id, order: i + 1, ...s },
         )
       }
@@ -204,9 +214,11 @@ router.post(
     const signer = contract.signers.find((s) => s.order === order)
     if (!signer) throw notFound('Signer')
     if (contract.status !== 'incomplete') throw new HttpError(409, `This contract is ${contract.status}`)
-    if (signer.signed) throw new HttpError(409, `${signer.name} has already signed`)
+    if (signer.signed) throw new HttpError(409, `${signer.name} has already ${signer.kind === 'reviewer' ? 'approved' : 'signed'}`)
+    const reviewing = signer.kind !== 'reviewer' && contract.signers.find((s) => s.kind === 'reviewer' && !s.signed)
+    if (reviewing) throw new HttpError(409, `${signer.name} will be invited after ${reviewing.name} approves the document`)
     const waitingOn = contract.signingMethod !== 'parallel' && contract.signers.find((s) => s.order < order && !s.signed)
-    if (waitingOn) throw new HttpError(409, `${signer.name} will be invited after ${waitingOn.name} signs`)
+    if (waitingOn) throw new HttpError(409, `${signer.name} will be invited after ${waitingOn.name} ${waitingOn.kind === 'reviewer' ? 'approves' : 'signs'}`)
 
     res.json(await inviteSigner(contract.id, order, req, { reminder: !!signer.invitedAt }))
   }),

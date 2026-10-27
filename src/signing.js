@@ -59,7 +59,7 @@ async function contractForMail(contractId) {
  */
 export async function inviteSigner(contractId, order, req, { reminder = false } = {}) {
   const c = await contractForMail(contractId)
-  const [s] = await query(`SELECT SignerOrder, Name, Email FROM ${t.ContractSigners} WHERE ContractId = @contractId AND SignerOrder = @order`, {
+  const [s] = await query(`SELECT SignerOrder, Name, Email, Kind FROM ${t.ContractSigners} WHERE ContractId = @contractId AND SignerOrder = @order`, {
     contractId,
     order,
   })
@@ -83,6 +83,7 @@ export async function inviteSigner(contractId, order, req, { reminder = false } 
       link,
       expiresAt: c.ExpiresAt,
       subject: c.EmailSubject,
+      review: s.Kind === 'reviewer',
     })
     if (!result.emailed) result.error = 'Email is not set up on the server (SMTP_HOST is empty), so the link was only printed in the backend console.'
   } catch (err) {
@@ -100,17 +101,20 @@ export async function inviteSigner(contractId, order, req, { reminder = false } 
 }
 
 /*
- * Invites whoever may sign now and has not been invited yet:
- * sequential -> the first signer who has not signed; parallel -> everyone.
+ * Invites whoever may act now and has not been invited yet. Reviewers come first: signers are
+ * only invited once every reviewer has approved.
+ * sequential -> the first one who has not finished; parallel -> everyone in the current stage.
  */
 export async function inviteNext(contractId, req) {
   const [c] = await query(`SELECT SigningMethod, ${STATUS_SQL} AS Status FROM ${t.Contracts} c WHERE c.Id = @contractId`, { contractId })
   if (!c || c.Status !== 'incomplete') return []
   const pending = await query(
-    `SELECT SignerOrder, InvitedAt FROM ${t.ContractSigners} WHERE ContractId = @contractId AND Signed = 0 ORDER BY SignerOrder`,
+    `SELECT SignerOrder, InvitedAt, Kind FROM ${t.ContractSigners} WHERE ContractId = @contractId AND Signed = 0 ORDER BY SignerOrder`,
     { contractId },
   )
-  const due = c.SigningMethod === 'parallel' ? pending : pending.slice(0, 1)
+  const reviewing = pending.filter((s) => s.Kind === 'reviewer')
+  const stage = reviewing.length ? reviewing : pending
+  const due = c.SigningMethod === 'parallel' ? stage : stage.slice(0, 1)
   const results = []
   for (const s of due.filter((x) => !x.InvitedAt)) results.push(await inviteSigner(contractId, s.SignerOrder, req))
   return results
@@ -138,7 +142,7 @@ async function loadForPdf(contractId) {
     { contractId },
   )
   const signers = await query(
-    `SELECT SignerOrder, RoleId, Name, Email, Method, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent
+    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
      FROM ${t.ContractSigners} WHERE ContractId = @contractId ORDER BY SignerOrder`,
     { contractId },
   )
@@ -255,14 +259,28 @@ export async function buildSignedPdf(contractId) {
   y -= 8
   rule()
 
+  const reviewers = signers.filter((s) => s.Kind === 'reviewer')
+  if (reviewers.length) {
+    line('Reviewers', { size: 13, f: bold, gap: 10 })
+    for (const s of reviewers) {
+      line(`${s.Name}`, { size: 11, f: bold, gap: 5 })
+      line(`Email: ${s.Email}`)
+      line(`Invited: ${fmt(s.InvitedAt)}    Viewed: ${fmt(s.ViewedAt)}`)
+      line(`Approved: ${fmt(s.SignedAt)}    IP address: ${s.SignedIp ?? '-'}`)
+      if (s.ReviewComment) line(`Comment: ${s.ReviewComment}`)
+      line(`Device: ${(s.SignedUserAgent ?? '-').slice(0, 110)}`, { size: 7.5, color: grey, gap: 10 })
+      rule()
+    }
+  }
+
   line('Signers', { size: 13, f: bold, gap: 10 })
-  for (const s of signers) {
+  for (const [i, s] of signers.filter((x) => x.Kind !== 'reviewer').entries()) {
     if (y < 150) {
       page = pdf.addPage([W, H])
       y = H - 56
     }
     const top = y
-    line(`${s.SignerOrder}. ${s.Name}`, { size: 11, f: bold, gap: 5 })
+    line(`${i + 1}. ${s.Name}`, { size: 11, f: bold, gap: 5 })
     line(`Email: ${s.Email}`)
     line(`Method: ${METHOD_LABELS[s.Method] ?? s.Method ?? 'Electronic signature'} (${s.SignatureType === 'type' ? 'typed' : 'drawn'} signature)`)
     line(`Invited: ${fmt(s.InvitedAt)}    Viewed: ${fmt(s.ViewedAt)}`)

@@ -149,28 +149,35 @@ async function send(kind, to, message, devLines) {
   return true
 }
 
-// Invitation with the signer's private link
-export async function sendSigningInvite({ to, name, contractName, orgName, senderName, link, expiresAt, subject }) {
+// Invitation with the signer's (or reviewer's) private link
+export async function sendSigningInvite({ to, name, contractName, orgName, senderName, link, expiresAt, subject, review = false }) {
   const from = senderName ? `${senderName} (${orgName})` : orgName
+  const task = review ? 'review and approve before it is sent for signing' : 'review and sign electronically'
+  const verb = review ? 'respond' : 'sign'
   const text = `Hi ${name},
 
-${from} has sent you "${contractName}" to review and sign electronically.
+${from} has sent you "${contractName}" to ${task}.
 
 Open the document: ${link}
 
-This link is personal to you; please don't forward it. Please sign before ${formatDate(expiresAt)}.`
+This link is personal to you; please don't forward it. Please ${verb} before ${formatDate(expiresAt)}.`
   const html = layout({
     body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name)},</p>
-          <p style="margin:0 0 16px"><b>${escapeHtml(from)}</b> has sent you a document to review and sign electronically.</p>
+          <p style="margin:0 0 16px"><b>${escapeHtml(from)}</b> has sent you a document to ${task}.</p>
           <div style="background:#f4f3fb;border-radius:10px;padding:14px 16px">
             <div style="font-size:12px;color:#6d6887;text-transform:uppercase;letter-spacing:.05em">Document</div>
             <div style="font-weight:700;font-size:16px">${escapeHtml(contractName)}</div>
-            <div style="font-size:13px;color:#6d6887;margin-top:4px">Please sign before ${escapeHtml(formatDate(expiresAt))}</div>
+            <div style="font-size:13px;color:#6d6887;margin-top:4px">Please ${verb} before ${escapeHtml(formatDate(expiresAt))}</div>
           </div>`,
-    button: { label: 'Review & sign', href: link },
+    button: { label: review ? 'Review document' : 'Review & sign', href: link },
     footer: 'This link is personal to you. Please do not forward this email.',
   })
-  return send('signing invite', to, { subject: subject || `Please sign: ${contractName}`, text, html }, [`document: ${contractName}`, `signing link: ${link}`])
+  // The workflow's custom subject is written for signers, so reviewers get their own
+  const defaultSubject = review ? `Please review: ${contractName}` : `Please sign: ${contractName}`
+  return send(review ? 'review invite' : 'signing invite', to, { subject: (!review && subject) || defaultSubject, text, html }, [
+    `document: ${contractName}`,
+    `${review ? 'review' : 'signing'} link: ${link}`,
+  ])
 }
 
 // Everyone signed: the signed PDF goes out as an attachment
@@ -191,18 +198,21 @@ export async function sendSigningCompleted({ to, name, contractName, fileName, p
   ])
 }
 
-// Tells the sender that a signer declined
-export async function sendSigningDeclined({ to, name, contractName, signerName, reason }) {
+// Tells the sender that a signer declined, or a reviewer rejected the document
+export async function sendSigningDeclined({ to, name, contractName, signerName, reason, review = false }) {
+  const what = review ? 'rejected' : 'declined to sign'
   const text = `Hi ${name || 'there'},
 
-${signerName} declined to sign "${contractName}".${reason ? `\n\nReason: ${reason}` : ''}
+${signerName} ${what} "${contractName}".${reason ? `\n\nReason: ${reason}` : ''}
 
 The contract has been stopped; no one else will be asked to sign it.`
   const html = layout({
     body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name || 'there')},</p>
-          <p style="margin:0 0 12px"><b>${escapeHtml(signerName)}</b> declined to sign <b>${escapeHtml(contractName)}</b>.</p>
+          <p style="margin:0 0 12px"><b>${escapeHtml(signerName)}</b> ${what} <b>${escapeHtml(contractName)}</b>.</p>
           ${reason ? `<div style="background:#fff4f2;border-radius:10px;padding:12px 16px;color:#7a2e1f;font-size:14px">“${escapeHtml(reason)}”</div>` : ''}
           <p style="margin:12px 0 0;color:#6d6887;font-size:13px">The contract has been stopped; no one else will be asked to sign it.</p>`,
   })
-  await send('declined notice', to, { subject: `Declined: ${contractName}`, text, html }, [`${signerName} declined "${contractName}"${reason ? `: ${reason}` : ''}`])
+  await send('declined notice', to, { subject: `${review ? 'Rejected' : 'Declined'}: ${contractName}`, text, html }, [
+    `${signerName} ${what} "${contractName}"${reason ? `: ${reason}` : ''}`,
+  ])
 }

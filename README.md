@@ -54,7 +54,7 @@ so no extra frontend configuration is needed. Check the connection at http://loc
 | `WorkflowVersions` | A snapshot on every save, shown in "Version History" |
 | `Templates` | Word-style template document (HTML), page setup and signing setup |
 | `Contracts` | A workflow initiated for real signers, with a snapshot of its signers and boxes; "expired" is computed from `ExpiresAt` |
-| `ContractSigners` | Each signer, in signing order: link token hash, invited / viewed / signed / declined times, signature image, IP |
+| `ContractSigners` | Each reviewer and signer, in order (`Kind`): link token hash, invited / viewed / signed (approved) / declined (rejected) times, signature image, review comment, IP |
 | `ContractDocuments` | The PDF the signers saw (`original`) and the final PDF with signatures and certificate (`signed`) |
 | `ContractEvents` | Audit trail (created, invited, viewed, signed, declined, completed, cancelled) |
 | `EmailOtps` | One-time login / signup codes (hashed), deleted once used |
@@ -65,6 +65,9 @@ Existing databases: run `npm run db:migrate` to apply [`sql/migrations`](sql/mig
 
 1. **Initiate** (`POST /api/contracts`): the workflow's PDF, signers and boxes are copied into the contract,
    so later workflow edits never change it. The first signer (sequential) or every signer (parallel) is emailed a private link.
+   If the workflow has **reviewers**, they are invited first instead (one by one, or all at once for parallel).
+   A reviewer opens the same page, reads the document and **approves** (optional comment) or **rejects** (with a reason,
+   which stops the contract). Signers are invited only once every reviewer has approved.
 2. **Sign** (public page `/sign/<token>`, no account needed): the signer reviews the PDF, draws or types a signature,
    agrees, and finishes. The next signer is then invited automatically.
 3. **Complete**: when the last signer signs, the signatures are stamped into their boxes, a certificate of completion
@@ -98,7 +101,7 @@ Errors are returned as `{ "error": "message" }` with a matching HTTP status.
 | PUT | `/api/templates/:id` | template JSON | template |
 | DELETE | `/api/templates/:id` | | 204 |
 | GET | `/api/contracts` | `?from=&to=` (optional dates) | contracts with signers |
-| POST | `/api/contracts` | `{ workflowId, signers: [{ name, email }] }` | contract + `invites` (201); emails the first link(s) |
+| POST | `/api/contracts` | `{ workflowId, signers: [{ name, email }], reviewers?: [{ name, email }] }` | contract + `invites` (201); emails the first link(s) |
 | GET | `/api/contracts/:id` | | contract with signers, `events`, `documents` |
 | GET | `/api/contracts/:id/document` | `?kind=original\|signed` | the PDF (signed once completed) |
 | POST | `/api/contracts/:id/signers/:order/resend` | | `{ link, emailed, error }`; the old link stops working |
@@ -106,6 +109,12 @@ Errors are returned as `{ "error": "message" }` with a matching HTTP status.
 | GET | `/api/sign/:token` | | what the signer sees: contract, their boxes, progress (public) |
 | GET | `/api/sign/:token/document` | | the PDF (public) |
 | POST | `/api/sign/:token/sign` | `{ signature: PNG data URL, type: draw\|type, consent: true }` | updated view (public) |
-| POST | `/api/sign/:token/decline` | `{ reason }` | updated view (public) |
+| POST | `/api/sign/:token/approve` | `{ comment? }` (reviewers only) | updated view (public) |
+| POST | `/api/sign/:token/decline` | `{ reason }` (a reviewer's decline is a rejection) | updated view (public) |
+| POST | `/api/translate` | `{ texts: string[], target: 'hi', source? }` | `{ translations, provider }` (template editor: Review > Translate) |
+
+**Translation:** set `GOOGLE_TRANSLATE_API_KEY` (Google Cloud Translation API; the first 500,000 characters a month are free)
+for reliable use. Without it, Google's free public endpoint is used: fine for trying the feature, but it is
+unofficial and refuses requests for a few minutes after bursts of traffic.
 
 Every query is parameterised and filtered by the signed-in user's organisation.

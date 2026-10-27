@@ -8,6 +8,7 @@ import workflowRoutes from './routes/workflows.js'
 import templateRoutes from './routes/templates.js'
 import contractRoutes from './routes/contracts.js'
 import signRoutes from './routes/sign.js'
+import translateRoutes from './routes/translate.js'
 
 export function createApp() {
   const app = express()
@@ -32,6 +33,7 @@ export function createApp() {
   app.use('/api/workflows', requireAuth, workflowRoutes)
   app.use('/api/templates', requireAuth, templateRoutes)
   app.use('/api/contracts', requireAuth, contractRoutes)
+  app.use('/api/translate', requireAuth, translateRoutes)
   // Signers open their emailed link without an account
   app.use('/api/sign', signRoutes)
 

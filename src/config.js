@@ -43,6 +43,10 @@ export const config = {
     // Codes one email address may request per 15 minutes
     maxPerWindow: 8,
   },
+  // Template translation. Without a key, Google's free (rate-limited) endpoint is used.
+  translate: {
+    googleApiKey: process.env.GOOGLE_TRANSLATE_API_KEY || '',
+  },
   jwt: {
     secret: process.env.JWT_SECRET,
     expiresIn: process.env.JWT_EXPIRES_IN || '8h',
