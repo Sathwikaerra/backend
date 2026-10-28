@@ -4,7 +4,7 @@ import { config } from './config.js'
 let poolPromise = null
 
 // Fully qualified table names, e.g. t.Users -> [eSign].[Users]. Use these in every query.
-const TABLES = ['Organisations', 'Users', 'Workflows', 'WorkflowFiles', 'WorkflowVersions', 'Templates', 'Contracts', 'ContractSigners', 'ContractDocuments', 'ContractEvents', 'EmailOtps']
+const TABLES = ['Organisations', 'Users', 'Workflows', 'WorkflowFiles', 'WorkflowVersions', 'Templates', 'Contracts', 'ContractSigners', 'ContractDocuments', 'ContractEvents', 'EmailOtps', 'ApiKeys', 'Webhooks', 'WebhookDeliveries']
 export const t = Object.freeze(Object.fromEntries(TABLES.map((name) => [name, `[${config.db.schema}].[${name}]`])))
 
 // One shared connection pool for the whole API, created on first use.
@@ -45,17 +45,21 @@ export async function query(statement, params = {}) {
 }
 
 // Runs fn(run) inside a transaction; run(statement, params) behaves like query().
+// run.afterCommit(cb) queues work (e.g. webhooks) that must only happen if the transaction commits.
 export async function transaction(fn) {
   const pool = await getPool()
   const tx = new sql.Transaction(pool)
+  const afterCommit = []
   await tx.begin()
   try {
     const run = async (statement, params = {}) => {
       assertTables(statement)
       return (await bind(new sql.Request(tx), params).query(statement)).recordset ?? []
     }
+    run.afterCommit = (cb) => afterCommit.push(cb)
     const result = await fn(run)
     await tx.commit()
+    for (const cb of afterCommit) Promise.resolve().then(cb).catch((err) => console.error('[db] after-commit task failed:', err))
     return result
   } catch (err) {
     await tx.rollback().catch(() => {})

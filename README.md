@@ -58,6 +58,9 @@ so no extra frontend configuration is needed. Check the connection at http://loc
 | `ContractDocuments` | The PDF the signers saw (`original`) and the final PDF with signatures and certificate (`signed`) |
 | `ContractEvents` | Audit trail (created, invited, viewed, signed, declined, completed, cancelled) |
 | `EmailOtps` | One-time login / signup codes (hashed), deleted once used |
+| `ApiKeys` | Keys for the public API (`/api/v1`); only a SHA-256 of each key is stored |
+| `Webhooks` | One webhook URL and signing secret per organisation |
+| `WebhookDeliveries` | Each webhook sent: event, attempts, the receiver's status code or error (kept 30 days) |
 
 Existing databases: run `npm run db:migrate` to apply [`sql/migrations`](sql/migrations) (safe to re-run).
 
@@ -118,3 +121,80 @@ for reliable use. Without it, Google's free public endpoint is used: fine for tr
 unofficial and refuses requests for a few minutes after bursts of traffic.
 
 Every query is parameterised and filtered by the signed-in user's organisation.
+
+## Public API for other systems (`/api/v1`)
+
+Other systems (a loan system, an HR system) start contracts without logging in. Create a key on the
+**Developers** page of the app and send it as `X-API-Key: esk_...` (`X-Auth-Token` and `Authorization: Bearer esk_...`
+are accepted too). A key acts for its organisation; revoking it stops it at once.
+
+One workflow is set up once in the app (signer roles, order, signature boxes, expiry). Each call then sends its own PDF and people:
+
+```http
+POST /api/v1/contracts
+X-API-Key: esk_...
+Content-Type: application/json
+
+{
+  "workflowId": "a2e5920d212a99f4a13e681c",
+  "name": "Home loan - Ravi Kumar",
+  "externalRef": "LOAN-1001",
+  "document": { "fileName": "loan-ravi.pdf", "base64": "JVBERi0x..." },
+  "reviewers": [{ "name": "Officer Rao", "email": "officer@yourco.com" }],
+  "signers": [{ "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "9876543210" }],
+  "sendEmails": false
+}
+```
+
+- `document` is optional; without it the workflow's PDF is used. Signature boxes keep the workflow's positions,
+  so send PDFs with the same layout. A PDF with fewer pages than the boxes need is refused (`GET /api/v1/workflows` shows `minPages`).
+  Up to 15 MB; password-protected PDFs are refused.
+- `reviewers` / `signers` must match the workflow's roles, in order. Emails must all differ. `phone` is optional (8-15 digits).
+- `sendEmails: false`: nothing is emailed and the response has a `signingLink` for **every** participant. Someone whose turn
+  has not come sees "waiting for ..." until it does. Default (`true`): we email links as usual and the response has links only
+  for whoever was invited now; later ones arrive in the `invited` webhook.
+- `externalRef` is your own id. Sending one that exists returns `409` with `contractId`, so retries never create duplicates.
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/v1/workflows` | active workflows with their reviewer / signer roles and `minPages` |
+| POST | `/api/v1/contracts` | contract with `participants[]` (`signingLink` as above) (201) |
+| GET | `/api/v1/contracts?externalRef=&status=` | up to 100 contracts, newest first |
+| GET | `/api/v1/contracts/:id` | status of the contract and each participant (`waiting`, `invited`, `viewed`, `signed`, `declined`; reviewers `approved` / `rejected`) |
+| GET | `/api/v1/contracts/:id/events` | audit trail |
+| GET | `/api/v1/contracts/:id/document` | `?kind=original\|signed` and `&format=base64` for JSON; the PDF otherwise. `signed` once completed |
+| POST | `/api/v1/contracts/:id/signers/:order/link` | `{ order, signingLink }`: a new link; the old one stops working |
+| POST | `/api/v1/contracts/:id/cancel` | the cancelled contract |
+| POST | `/api/v1/tools/pdf-to-base64` | `{ fileName, sizeBytes, pages, base64 }` for a PDF sent as form field `file`, or as the raw body with `Content-Type: application/pdf` (`?fileName=`) |
+
+**Getting the base64 of a PDF.** Most languages do it in one line (C#: `Convert.ToBase64String(File.ReadAllBytes(path))`,
+Node: `fs.readFileSync(path).toString('base64')`). Otherwise:
+
+- `npm run pdf:base64 -- C:\docs\loan.pdf --json` writes `loan.base64.txt` and `loan.document.json` (`{ fileName, base64 }`,
+  ready to paste as `document`) next to the PDF.
+- `curl -X POST -H "X-API-Key: esk_..." -F "file=@loan.pdf" http://localhost:4000/api/v1/tools/pdf-to-base64`
+  (signed-in users: `POST /api/developer/pdf-to-base64`).
+- In code: `import { pdfToBase64 } from './src/pdf.js'`; `await pdfToBase64('loan.pdf')`.
+
+All three check that the file is a readable, unprotected PDF of at most 15 MB, and report its page count.
+
+## Webhooks
+
+Set one URL per organisation on the Developers page (`https://`, or `http://localhost` while developing).
+Every contract event is POSTed as JSON: `created`, `invited`, `viewed`, `approved`, `signed`, `rejected`, `declined`,
+`completed`, `cancelled`, `reminded`, `link_reissued` (and `ping` from "Send test").
+
+```json
+{
+  "id": "delivery id", "event": "signed", "occurredAt": "2026-10-28T13:09:50.000Z",
+  "contract": { "id": "...", "externalRef": "LOAN-1001", "name": "...", "workflowId": "...", "source": "api", "status": "incomplete", "expiresAt": "...", "completedAt": null },
+  "signer": { "order": 2, "kind": "signer", "name": "Ravi Kumar", "email": "ravi@example.com", "phone": "9876543210", "status": "signed", "signedAt": "..." },
+  "detail": "Drew and adopted a signature"
+}
+```
+
+On `invited` (when we email the link) `signer.signingLink` is included. Headers: `X-Esign-Event`, `X-Esign-Delivery`,
+`X-Esign-Timestamp` and `X-Esign-Signature: sha256=<hex>`, the HMAC-SHA256 of `<timestamp>.<raw body>` with the webhook secret.
+Verify it, and reject old timestamps. Answer 2xx within 10 s; otherwise we retry after 5 s and 30 s. Webhooks are sent
+after the change is saved and never slow down signing. When `completed` arrives, fetch the signed PDF from
+`/api/v1/contracts/:id/document?kind=signed`.

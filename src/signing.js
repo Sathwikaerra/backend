@@ -3,6 +3,7 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
 import { config } from './config.js'
 import { binary, query, t } from './db.js'
 import { sendSigningCompleted, sendSigningInvite } from './mailer.js'
+import { emitContractEvent } from './webhooks.js'
 
 /*
  * Contract signing: private links, invitations in signing order, and the final signed PDF.
@@ -34,16 +35,21 @@ export function appUrl(req) {
 
 const clientIp = (req) => (req?.ip || '').replace(/^::ffff:/, '').slice(0, 64) || null
 
-export async function logEvent(run, { contractId, signerOrder = null, event, detail = null, req }) {
+// Records an audit-trail event and sends it to the organisation's webhook (after commit when inside a transaction).
+// `link` is a fresh signing link to include in the webhook; it is never stored.
+export async function logEvent(run, { contractId, signerOrder = null, event, detail = null, req, link = null }) {
   await run(
     `INSERT INTO ${t.ContractEvents} (ContractId, SignerOrder, Event, Detail, IpAddress) VALUES (@contractId, @signerOrder, @event, @detail, @ip)`,
     { contractId, signerOrder, event, detail: detail ? String(detail).slice(0, 500) : null, ip: clientIp(req) },
   )
+  const emit = () => emitContractEvent({ contractId, event, signerOrder, detail, link })
+  if (run.afterCommit) run.afterCommit(emit)
+  else emit()
 }
 
 async function contractForMail(contractId) {
   const [c] = await query(
-    `SELECT c.Id, c.Name, c.ExpiresAt, c.EmailSubject, c.SigningMethod, o.Name AS OrgName, u.Name AS SenderName, u.Email AS SenderEmail
+    `SELECT c.Id, c.Name, c.ExpiresAt, c.EmailSubject, c.SigningMethod, c.Notify, o.Name AS OrgName, u.Name AS SenderName, u.Email AS SenderEmail
      FROM ${t.Contracts} c
      JOIN ${t.Organisations} o ON o.Id = c.OrganisationId
      LEFT JOIN ${t.Users} u ON u.Id = c.CreatedBy
@@ -51,6 +57,17 @@ async function contractForMail(contractId) {
     { contractId },
   )
   return c
+}
+
+// Gives one participant a fresh signing link and returns it; their older link stops working
+export async function issueLink(contractId, order, req) {
+  const token = crypto.randomBytes(32).toString('base64url')
+  await query(`UPDATE ${t.ContractSigners} SET TokenHash = @hash WHERE ContractId = @contractId AND SignerOrder = @order`, {
+    hash: hashToken(token),
+    contractId,
+    order,
+  })
+  return `${appUrl(req)}/sign/${token}`
 }
 
 /*
@@ -65,13 +82,11 @@ export async function inviteSigner(contractId, order, req, { reminder = false } 
   })
   if (!c || !s) throw new Error('Signer not found')
 
-  const token = crypto.randomBytes(32).toString('base64url')
-  await query(
-    `UPDATE ${t.ContractSigners} SET TokenHash = @hash, InvitedAt = COALESCE(InvitedAt, SYSUTCDATETIME())
-     WHERE ContractId = @contractId AND SignerOrder = @order`,
-    { hash: hashToken(token), contractId, order },
-  )
-  const link = `${appUrl(req)}/sign/${token}`
+  const link = await issueLink(contractId, order, req)
+  await query(`UPDATE ${t.ContractSigners} SET InvitedAt = COALESCE(InvitedAt, SYSUTCDATETIME()) WHERE ContractId = @contractId AND SignerOrder = @order`, {
+    contractId,
+    order,
+  })
   const result = { order, email: s.Email, link, emailed: false, error: null }
   try {
     result.emailed = await sendSigningInvite({
@@ -96,8 +111,22 @@ export async function inviteSigner(contractId, order, req, { reminder = false } 
     event: reminder ? 'reminded' : 'invited',
     detail: result.emailed ? `Invitation emailed to ${s.Email}` : `Invitation to ${s.Email} not emailed: ${result.error}`,
     req,
+    link,
   })
   return result
+}
+
+// Contracts created with notify 'none': the API caller already holds every link, so only mark the turn
+async function markReady(contractId, order, req) {
+  const rows = await query(
+    `UPDATE ${t.ContractSigners} SET InvitedAt = SYSUTCDATETIME() OUTPUT inserted.Email
+     WHERE ContractId = @contractId AND SignerOrder = @order AND InvitedAt IS NULL`,
+    { contractId, order },
+  )
+  if (rows.length) {
+    await logEvent(query, { contractId, signerOrder: order, event: 'invited', detail: `Ready for ${rows[0].Email}; the link is delivered by the API caller`, req })
+  }
+  return { order, email: rows[0]?.Email ?? null, link: null, emailed: false, error: null }
 }
 
 /*
@@ -106,7 +135,7 @@ export async function inviteSigner(contractId, order, req, { reminder = false } 
  * sequential -> the first one who has not finished; parallel -> everyone in the current stage.
  */
 export async function inviteNext(contractId, req) {
-  const [c] = await query(`SELECT SigningMethod, ${STATUS_SQL} AS Status FROM ${t.Contracts} c WHERE c.Id = @contractId`, { contractId })
+  const [c] = await query(`SELECT SigningMethod, Notify, ${STATUS_SQL} AS Status FROM ${t.Contracts} c WHERE c.Id = @contractId`, { contractId })
   if (!c || c.Status !== 'incomplete') return []
   const pending = await query(
     `SELECT SignerOrder, InvitedAt, Kind FROM ${t.ContractSigners} WHERE ContractId = @contractId AND Signed = 0 ORDER BY SignerOrder`,
@@ -116,7 +145,9 @@ export async function inviteNext(contractId, req) {
   const stage = reviewing.length ? reviewing : pending
   const due = c.SigningMethod === 'parallel' ? stage : stage.slice(0, 1)
   const results = []
-  for (const s of due.filter((x) => !x.InvitedAt)) results.push(await inviteSigner(contractId, s.SignerOrder, req))
+  for (const s of due.filter((x) => !x.InvitedAt)) {
+    results.push(c.Notify === 'none' ? await markReady(contractId, s.SignerOrder, req) : await inviteSigner(contractId, s.SignerOrder, req))
+  }
   return results
 }
 
@@ -329,7 +360,8 @@ export async function finalizeContract(contractId, req) {
   await logEvent(query, { contractId, event: 'completed', detail: `Signed PDF created (SHA-256 ${sha256(data).slice(0, 16)}...)`, req })
   const c = await contractForMail(contractId)
   const signers = await query(`SELECT Name, Email FROM ${t.ContractSigners} WHERE ContractId = @contractId ORDER BY SignerOrder`, { contractId })
-  const recipients = [...signers.map((s) => ({ name: s.Name, email: s.Email }))]
+  // When the API caller delivers the links, they deliver the signed copy too; the sender still gets it
+  const recipients = c.Notify === 'none' ? [] : signers.map((s) => ({ name: s.Name, email: s.Email }))
   if (c.SenderEmail && !recipients.some((r) => r.email === c.SenderEmail)) recipients.push({ name: c.SenderName, email: c.SenderEmail })
   for (const r of recipients) {
     await sendSigningCompleted({ to: r.email, name: r.name, contractName: c.Name, fileName, pdf: data }).catch(() => {})

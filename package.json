@@ -10,7 +10,8 @@
     "db:init": "node src/scripts/initDb.js",
     "db:migrate": "node src/scripts/migrate.js",
     "mail:test": "node src/scripts/mailTest.js",
-    "db:seed": "node src/scripts/seed.js"
+    "db:seed": "node src/scripts/seed.js",
+    "pdf:base64": "node src/scripts/pdfToBase64.js"
   },
   "engines": {
     "node": ">=20"

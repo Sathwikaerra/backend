@@ -1,70 +1,10 @@
 import { Router } from 'express'
-import { binary, query, text, transaction, t } from '../db.js'
-import { STATUS_SQL, ensureSignedDocument, inviteNext, inviteSigner, logEvent, sha256 } from '../signing.js'
-import { EMAIL_RE, HttpError, badRequest, computeExpiry, handle, newId, notFound, requireString } from '../utils.js'
+import { cancelContract, createContract, loadContract, loadContracts } from '../contracts.js'
+import { query, t } from '../db.js'
+import { ensureSignedDocument, inviteSigner } from '../signing.js'
+import { HttpError, badRequest, handle, notFound } from '../utils.js'
 
 const router = Router()
-
-const signerStatus = (r) => (r.Signed ? 'signed' : r.DeclinedAt ? 'declined' : r.ViewedAt ? 'viewed' : r.InvitedAt ? 'invited' : 'waiting')
-
-async function loadContracts(where, params) {
-  const rows = await query(
-    `SELECT c.Id, c.WorkflowId, c.Name, c.WorkflowName, c.Estamping, c.SigningMethod, ${STATUS_SQL} AS Status,
-            c.CreatedAt, c.ExpiresAt, c.CompletedAt, c.CancelledAt,
-            s.SignerOrder, s.Kind, s.Name AS SignerName, s.Email, s.Method, s.Signed, s.SignedAt,
-            s.InvitedAt, s.ViewedAt, s.DeclinedAt, s.DeclineReason, s.ReviewComment
-     FROM ${t.Contracts} c
-     LEFT JOIN ${t.ContractSigners} s ON s.ContractId = c.Id
-     WHERE ${where}
-     ORDER BY c.CreatedAt DESC, s.SignerOrder`,
-    params,
-  )
-  // Rows come back one per signer; fold them into one object per contract
-  const byId = new Map()
-  for (const r of rows) {
-    if (!byId.has(r.Id)) {
-      byId.set(r.Id, {
-        id: r.Id,
-        workflowId: r.WorkflowId,
-        name: r.Name,
-        workflowName: r.WorkflowName,
-        estamping: r.Estamping || '—',
-        signingMethod: r.SigningMethod,
-        status: r.Status,
-        createdAt: r.CreatedAt,
-        expiresAt: r.ExpiresAt,
-        completedAt: r.CompletedAt,
-        cancelledAt: r.CancelledAt,
-        signers: [],
-      })
-    }
-    if (r.SignerOrder != null) {
-      // Reviewers are listed here too (kind 'reviewer'): "signed" means approved, "declined" means rejected
-      byId.get(r.Id).signers.push({
-        order: r.SignerOrder,
-        kind: r.Kind,
-        reviewComment: r.ReviewComment,
-        name: r.SignerName,
-        email: r.Email,
-        method: r.Method,
-        signed: !!r.Signed,
-        signedAt: r.SignedAt,
-        invitedAt: r.InvitedAt,
-        viewedAt: r.ViewedAt,
-        declinedAt: r.DeclinedAt,
-        declineReason: r.DeclineReason,
-        status: signerStatus(r),
-      })
-    }
-  }
-  return [...byId.values()]
-}
-
-async function loadContract(id, orgId) {
-  const [contract] = await loadContracts('c.Id = @id AND c.OrganisationId = @orgId', { id, orgId })
-  if (!contract) throw notFound('Contract')
-  return contract
-}
 
 // GET /api/contracts?from=2026-10-01&to=2026-10-31   (dates optional, inclusive)
 router.get(
@@ -81,84 +21,16 @@ router.get(
   }),
 )
 
-// Checks the people entered for one kind of role; `label` is used in error messages
-function cleanPeople(list, roles, label) {
-  const people = Array.isArray(list) ? list : []
-  if (people.length !== roles.length) throw badRequest(`This workflow needs exactly ${roles.length} ${label}(s)`)
-  return people.map((p, i) => {
-    const email = requireString(p?.email, `Email of ${label} ${i + 1}`, { max: 320 }).toLowerCase()
-    if (!EMAIL_RE.test(email)) throw badRequest(`Enter a valid email for ${label} ${i + 1}`)
-    return { name: requireString(p?.name, `Name of ${label} ${i + 1}`), email, method: roles[i].methods?.[0] ?? null, roleId: String(roles[i].id) }
-  })
-}
-
 // POST /api/contracts  { workflowId, signers: [{ name, email }], reviewers?: [{ name, email }] }
 // -> creates the contract and emails the first invitation(s); reviewers go first
 router.post(
   '/',
   handle(async (req, res) => {
     const orgId = req.user.organisationId
-    const workflowId = requireString(req.body.workflowId, 'workflowId', { max: 32 })
-    const [wf] = await query(
-      `SELECT w.Name, w.Status, w.SigningMethod, w.BasicJson, w.ParticipantsJson, w.BoxesJson, f.FileName, f.Data
-       FROM ${t.Workflows} w LEFT JOIN ${t.WorkflowFiles} f ON f.WorkflowId = w.Id
-       WHERE w.Id = @workflowId AND w.OrganisationId = @orgId`,
-      { workflowId, orgId },
+    const { id, invites } = await createContract(
+      { orgId, userId: req.user.id, workflowId: req.body.workflowId, signers: req.body.signers, reviewers: req.body.reviewers },
+      req,
     )
-    if (!wf) throw notFound('Workflow')
-    if (wf.Status !== 'active') throw new HttpError(409, 'Only active workflows can be initiated')
-    if (!wf.Data) throw new HttpError(409, 'This workflow has no document. Edit it and upload a PDF first.')
-
-    const basic = JSON.parse(wf.BasicJson)
-    const participants = JSON.parse(wf.ParticipantsJson)
-    const reviewers = cleanPeople(req.body.reviewers, participants.filter((p) => p.kind === 'reviewer'), 'reviewer').map((r) => ({ ...r, method: null, kind: 'reviewer' }))
-    const signers = cleanPeople(req.body.signers, participants.filter((p) => p.kind === 'signer'), 'signer').map((s) => ({ ...s, kind: 'signer' }))
-    const clean = [...reviewers, ...signers]
-    if (new Set(clean.map((s) => s.email)).size !== clean.length) throw badRequest('Each reviewer and signer needs a different email address')
-
-    const id = newId()
-    const now = new Date()
-    const name = (basic.contractName || wf.Name).slice(0, 200)
-    await transaction(async (run) => {
-      await run(
-        `INSERT INTO ${t.Contracts}
-           (Id, OrganisationId, WorkflowId, Name, WorkflowName, Estamping, CreatedBy, CreatedAt, ExpiresAt,
-            SigningMethod, ParticipantsJson, BoxesJson, EmailSubject)
-         VALUES (@id, @orgId, @workflowId, @name, @workflowName, @estamping, @userId, @now, @expiresAt,
-            @signingMethod, @participants, @boxes, @subject)`,
-        {
-          id,
-          orgId,
-          workflowId,
-          name,
-          workflowName: wf.Name,
-          estamping: basic.stampingMethod || null,
-          userId: req.user.id,
-          now,
-          expiresAt: computeExpiry(basic.expiryValue, basic.expiryUnit, now),
-          signingMethod: wf.SigningMethod === 'parallel' ? 'parallel' : 'sequential',
-          participants: text(JSON.stringify(participants)),
-          boxes: text(wf.BoxesJson),
-          subject: basic.emailSubject ? String(basic.emailSubject).slice(0, 300) : null,
-        },
-      )
-      // The signers sign this exact copy, even if the workflow's PDF is replaced later
-      await run(
-        `INSERT INTO ${t.ContractDocuments} (ContractId, Kind, FileName, SizeBytes, Sha256, Data)
-         VALUES (@id, N'original', @fileName, @size, @hash, @data)`,
-        { id, fileName: wf.FileName, size: wf.Data.length, hash: sha256(wf.Data), data: binary(wf.Data) },
-      )
-      for (const [i, s] of clean.entries()) {
-        await run(
-          `INSERT INTO ${t.ContractSigners} (ContractId, SignerOrder, RoleId, Kind, Name, Email, Method)
-           VALUES (@id, @order, @roleId, @kind, @name, @email, @method)`,
-          { id, order: i + 1, ...s },
-        )
-      }
-      await logEvent(run, { contractId: id, event: 'created', detail: `Initiated from workflow "${wf.Name}"`, req })
-    })
-
-    const invites = await inviteNext(id, req)
     res.status(201).json({
       ...(await loadContract(id, orgId)),
       invites: invites.map(({ order, email, emailed, error }) => ({ order, email, emailed, error })),
@@ -228,15 +100,7 @@ router.post(
 router.post(
   '/:id/cancel',
   handle(async (req, res) => {
-    const contract = await loadContract(req.params.id, req.user.organisationId)
-    const rows = await query(
-      `UPDATE ${t.Contracts} SET Status = N'cancelled', CancelledAt = SYSUTCDATETIME()
-       OUTPUT inserted.Id WHERE Id = @id AND Status = N'incomplete' AND ExpiresAt >= SYSUTCDATETIME()`,
-      { id: contract.id },
-    )
-    if (!rows.length) throw new HttpError(409, `This contract is ${contract.status}`)
-    await logEvent(query, { contractId: contract.id, event: 'cancelled', detail: 'Cancelled by the sender', req })
-    res.json(await loadContract(contract.id, req.user.organisationId))
+    res.json(await cancelContract(req.params.id, req.user.organisationId, req))
   }),
 )
 

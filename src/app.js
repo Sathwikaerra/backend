@@ -2,13 +2,15 @@ import express from 'express'
 import cors from 'cors'
 import { config } from './config.js'
 import { getPool } from './db.js'
-import { errorHandler, notFoundRoute, requireAuth } from './middleware.js'
+import { errorHandler, notFoundRoute, requireApiKey, requireAuth } from './middleware.js'
 import authRoutes from './routes/auth.js'
 import workflowRoutes from './routes/workflows.js'
 import templateRoutes from './routes/templates.js'
 import contractRoutes from './routes/contracts.js'
 import signRoutes from './routes/sign.js'
 import translateRoutes from './routes/translate.js'
+import developerRoutes from './routes/developer.js'
+import v1Routes from './routes/v1.js'
 
 export function createApp() {
   const app = express()
@@ -34,6 +36,9 @@ export function createApp() {
   app.use('/api/templates', requireAuth, templateRoutes)
   app.use('/api/contracts', requireAuth, contractRoutes)
   app.use('/api/translate', requireAuth, translateRoutes)
+  app.use('/api/developer', requireAuth, developerRoutes)
+  // Other systems call this with an API key instead of a login
+  app.use('/api/v1', requireApiKey, v1Routes)
   // Signers open their emailed link without an account
   app.use('/api/sign', signRoutes)
 
