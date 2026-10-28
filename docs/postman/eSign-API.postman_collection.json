@@ -1,0 +1,143 @@
+{
+  "info": {
+    "name": "eSign Doc Builder API",
+    "description": "Start contracts from a workflow with your own PDF and signers.\n\n1. Set the collection variables baseUrl, apiKey (Developers page > Create key) and workflowId.\n2. Run '1. List workflows' to check the key.\n3. In '2. PDF to base64' pick your PDF under Body > form-data > file and Send: the base64 is saved for the next request.\n4. Edit the signers in '3. Create contract' and Send: the signing links are in the response (and the Console).\n5. Sign in the browser, then use 4-6 to check the status and download the signed PDF.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "X-API-Key", "type": "string" },
+      { "key": "value", "value": "{{apiKey}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000/api/v1" },
+    { "key": "apiKey", "value": "esk_paste_your_key_here" },
+    { "key": "workflowId", "value": "paste_workflow_id_here" },
+    { "key": "pdfBase64", "value": "" },
+    { "key": "pdfFileName", "value": "" },
+    { "key": "contractId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. List workflows",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/workflows",
+        "description": "Active workflows with their signer / reviewer roles and minPages (the fewest pages a PDF you send may have)."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('API key works', () => pm.response.to.have.status(200));",
+              "const list = pm.response.json();",
+              "if (list.length && pm.collectionVariables.get('workflowId').startsWith('paste_')) {",
+              "  pm.collectionVariables.set('workflowId', list[0].id);",
+              "  console.log('workflowId set to the first workflow:', list[0].name, list[0].id);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. PDF to base64",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/tools/pdf-to-base64",
+        "body": {
+          "mode": "formdata",
+          "formdata": [{ "key": "file", "type": "file", "src": [], "description": "Choose your PDF here" }]
+        },
+        "description": "Pick a PDF in Body > form-data > file. The base64 and file name are saved to the collection variables pdfBase64 / pdfFileName, which '3. Create contract' uses."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('PDF converted', () => pm.response.to.have.status(200));",
+              "const r = pm.response.json();",
+              "if (r.base64) {",
+              "  pm.collectionVariables.set('pdfBase64', r.base64);",
+              "  pm.collectionVariables.set('pdfFileName', r.fileName);",
+              "  console.log(`Saved ${r.fileName}: ${r.pages} page(s), ${Math.round(r.sizeBytes / 1024)} KB`);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Create contract",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/contracts",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"workflowId\": \"{{workflowId}}\",\n  \"name\": \"Test loan - Ravi Kumar\",\n  \"externalRef\": \"TEST-{{$timestamp}}\",\n  \"document\": {\n    \"fileName\": \"{{pdfFileName}}\",\n    \"base64\": \"{{pdfBase64}}\"\n  },\n  \"signers\": [\n    { \"name\": \"Ravi Kumar\", \"email\": \"ravi@example.com\", \"phone\": \"9876543210\" }\n  ],\n  \"sendEmails\": false\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "One entry in signers per signer role of the workflow, in order (add \"reviewers\": [...] if it has reviewers). Every email must differ.\n\nsendEmails false: nothing is emailed and every participant's signingLink is in the response. Remove the document block to use the workflow's own PDF."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Contract created', () => pm.response.to.have.status(201));",
+              "const c = pm.response.json();",
+              "if (c.id) {",
+              "  pm.collectionVariables.set('contractId', c.id);",
+              "  console.log('contractId:', c.id);",
+              "  (c.participants || []).forEach((p) => console.log(`${p.order}. ${p.kind} ${p.name}: ${p.signingLink || '(link comes later by email)'}`));",
+              "} else {",
+              "  console.log('Error:', c.error);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Get contract status",
+      "request": { "method": "GET", "url": "{{baseUrl}}/contracts/{{contractId}}" }
+    },
+    {
+      "name": "5. Audit trail",
+      "request": { "method": "GET", "url": "{{baseUrl}}/contracts/{{contractId}}/events" }
+    },
+    {
+      "name": "6. Download signed PDF",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/contracts/{{contractId}}/document?kind=signed",
+        "description": "Works once the status is completed. In Postman use Send and Download (the arrow next to Send) to save the PDF. Use kind=original for the PDF you sent, and add &format=base64 to get JSON instead of a file."
+      }
+    },
+    {
+      "name": "7. New signing link",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/contracts/{{contractId}}/signers/1/link",
+        "description": "Change the 1 to the participant's order. Their old link stops working."
+      }
+    },
+    {
+      "name": "8. Find by externalRef",
+      "request": { "method": "GET", "url": "{{baseUrl}}/contracts?externalRef=TEST-123" }
+    },
+    {
+      "name": "9. Cancel contract",
+      "request": { "method": "POST", "url": "{{baseUrl}}/contracts/{{contractId}}/cancel" }
+    }
+  ]
+}
