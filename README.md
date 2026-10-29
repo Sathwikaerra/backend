@@ -198,3 +198,10 @@ On `invited` (when we email the link) `signer.signingLink` is included. Headers:
 Verify it, and reject old timestamps. Answer 2xx within 10 s; otherwise we retry after 5 s and 30 s. Webhooks are sent
 after the change is saved and never slow down signing. When `completed` arrives, fetch the signed PDF from
 `/api/v1/contracts/:id/document?kind=signed`.
+
+### Built-in sample receiver
+
+To try webhooks without writing a receiver, set the webhook URL to `http://localhost:4000/api/webhook-receiver`.
+It plays the part of a loan system: it checks the signature, logs each event in the console, and on `completed` saves the
+signed PDF to `backend/webhook-inbox/<externalRef>-signed.pdf`. `GET /api/webhook-receiver` (signed in) lists the latest
+events it received for your organisation. They are kept in memory only, so a restart clears them.

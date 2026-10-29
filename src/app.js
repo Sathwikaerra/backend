@@ -11,6 +11,7 @@ import signRoutes from './routes/sign.js'
 import translateRoutes from './routes/translate.js'
 import developerRoutes from './routes/developer.js'
 import v1Routes from './routes/v1.js'
+import webhookReceiverRoutes from './routes/webhookReceiver.js'
 
 export function createApp() {
   const app = express()
@@ -18,6 +19,8 @@ export function createApp() {
   // Requests arrive through the Vite proxy in development; trust it for the client IP
   app.set('trust proxy', 'loopback')
   app.use(cors({ origin: config.corsOrigins }))
+  // Sample webhook receiver; mounted before the JSON parser because it checks the signature on the raw body
+  app.use('/api/webhook-receiver', webhookReceiverRoutes)
   // Templates can embed images, so allow larger JSON bodies than the default 100 KB
   app.use(express.json({ limit: '20mb' }))
 
