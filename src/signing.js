@@ -190,7 +190,7 @@ async function loadForPdf(contractId) {
     { contractId },
   )
   const signers = await query(
-    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedMethod, Verification, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
+    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedMethod, Verification, LocationJson, PhotoImage, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
      FROM ${t.ContractSigners} WHERE ContractId = @contractId ORDER BY SignerOrder`,
     { contractId },
   )
@@ -323,7 +323,7 @@ export async function buildSignedPdf(contractId) {
 
   line('Signers', { size: 13, f: bold, gap: 10 })
   for (const [i, s] of signers.filter((x) => x.Kind !== 'reviewer').entries()) {
-    if (y < 150) {
+    if (y < (s.PhotoImage ? 250 : 150)) {
       page = pdf.addPage([W, H])
       y = H - 56
     }
@@ -335,7 +335,20 @@ export async function buildSignedPdf(contractId) {
     if (s.Verification) line(`Verification: ${s.Verification.slice(0, 110)}`)
     line(`Invited: ${fmt(s.InvitedAt)}    Viewed: ${fmt(s.ViewedAt)}`)
     line(`Signed: ${fmt(s.SignedAt)}    IP address: ${s.SignedIp ?? '-'}`)
+    const loc = s.LocationJson ? JSON.parse(s.LocationJson) : null
+    if (loc) line(`Location: ${loc.lat}, ${loc.lng}${loc.accuracy != null ? ` (within ${loc.accuracy} m)` : ''}    https://maps.google.com/?q=${loc.lat},${loc.lng}`)
     line(`Device: ${(s.SignedUserAgent ?? '-').slice(0, 110)}`, { size: 7.5, color: grey, gap: 10 })
+    if (s.PhotoImage) {
+      // Live photo taken while signing
+      const photo = await pdf.embedJpg(Buffer.from(s.PhotoImage.split(',')[1] ?? '', 'base64')).catch(() => null)
+      if (photo) {
+        const ph = 84
+        const pw = (photo.width / photo.height) * ph
+        line('Live photo:', { size: 8, color: grey, gap: 2 })
+        page.drawImage(photo, { x: 48, y: y - ph, width: pw, height: ph })
+        y -= ph + 10
+      }
+    }
     const img = images.get(s.SignerOrder)
     if (img) {
       const scale = Math.min(130 / img.width, 46 / img.height)

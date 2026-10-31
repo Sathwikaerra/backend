@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { cancelContract, createContract, loadContract, loadContracts } from '../contracts.js'
+import { cancelContract, createContract, loadContract, loadContracts, sendSignerPhoto } from '../contracts.js'
 import { query, t } from '../db.js'
 import { ensureSignedDocument, issueLink, logEvent } from '../signing.js'
 import { HttpError, badRequest, handle, notFound, parseJson } from '../utils.js'
@@ -15,6 +15,7 @@ import pdfTools from './pdfTools.js'
  *   GET  /api/v1/contracts/:id/events                   audit trail
  *   GET  /api/v1/contracts/:id/document?kind=signed|original[&format=base64]
  *   POST /api/v1/contracts/:id/signers/:order/link      fresh link for one participant (the old one stops working)
+ *   GET  /api/v1/contracts/:id/signers/:order/photo     live photo taken while signing (JPEG)
  *   POST /api/v1/contracts/:id/cancel
  *   POST /api/v1/tools/pdf-to-base64                    a PDF (form field "file" or raw body) -> its base64
  */
@@ -52,6 +53,8 @@ function apiContract(c, links = {}) {
       declineReason: s.declineReason,
       reviewComment: s.reviewComment,
       signedWith: s.signedMethod ?? null,
+      location: s.location ?? null,
+      photoCaptured: !!s.hasPhoto,
       verification: s.verification ?? null,
       ...(links[s.order] ? { signingLink: links[s.order] } : {}),
     })),
@@ -203,6 +206,15 @@ router.post(
     const signingLink = await issueLink(c.id, order, req)
     await logEvent(query, { contractId: c.id, signerOrder: order, event: 'link_reissued', detail: 'New signing link created through the API', req })
     res.json({ order, signingLink })
+  }),
+)
+
+// GET /api/v1/contracts/:id/signers/:order/photo
+router.get(
+  '/contracts/:id/signers/:order/photo',
+  handle(async (req, res) => {
+    const c = await loadContract(req.params.id, req.user.organisationId)
+    await sendSignerPhoto(res, c.id, req.params.order)
   }),
 )
 

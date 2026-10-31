@@ -406,3 +406,14 @@ GO
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_SigningChallenges_Signer' AND object_id = OBJECT_ID(N'eSign.SigningChallenges'))
   CREATE INDEX IX_SigningChallenges_Signer ON eSign.SigningChallenges (ContractId, SignerOrder, CreatedAt);
 GO
+
+/* ---------- 006: location and live photo (see sql/migrations/006_signer_captures.sql) ---------- */
+IF COL_LENGTH(N'eSign.ContractSigners', N'Captures') IS NULL
+  ALTER TABLE eSign.ContractSigners ADD Captures NVARCHAR(100) NULL;
+GO
+IF COL_LENGTH(N'eSign.ContractSigners', N'LocationJson') IS NULL
+  ALTER TABLE eSign.ContractSigners ADD LocationJson NVARCHAR(1000) NULL;
+GO
+IF COL_LENGTH(N'eSign.ContractSigners', N'PhotoImage') IS NULL
+  ALTER TABLE eSign.ContractSigners ADD PhotoImage NVARCHAR(MAX) NULL;
+GO

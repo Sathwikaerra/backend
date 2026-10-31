@@ -228,3 +228,12 @@ DSC signing needs the signer's token utility; they plug into `provider` in `src/
 
 The certificate of completion and `GET /api/v1/contracts/:id` (`signedWith`, `verification`) show the method used and what
 was checked. Only a hash of an OTP and the last 4 digits of an Aadhaar number are stored.
+
+### Location and live photo
+
+In the workflow's signer setup ("More Options" > Capture while signing) a signer can be asked for their **GPS location**
+and a **live photo** from the camera. The signing page then adds those steps before the consent, and `/sign` refuses to
+sign without them (`location: { lat, lng, accuracy }`, `photo: "data:image/jpeg;base64,..."`). Both are kept on the signer
+(`LocationJson`, `PhotoImage`), written to the audit trail, and shown on the certificate of completion (coordinates with a
+map link, and the photo). The sender sees them on the contract page; `GET /api/v1/contracts/:id` returns `location` and
+`photoCaptured`, and the photo itself is at `GET /api/v1/contracts/:id/signers/:order/photo`.

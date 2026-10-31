@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { cancelContract, createContract, loadContract, loadContracts } from '../contracts.js'
+import { cancelContract, createContract, loadContract, loadContracts, sendSignerPhoto } from '../contracts.js'
 import { query, t } from '../db.js'
 import { ensureSignedDocument, inviteSigner } from '../signing.js'
 import { HttpError, badRequest, handle, notFound } from '../utils.js'
@@ -74,6 +74,15 @@ router.get(
     res.set('Content-Type', 'application/pdf')
     res.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(file.FileName)}`)
     res.send(file.Data)
+  }),
+)
+
+// GET /api/contracts/:id/signers/:order/photo  -> live photo the signer took while signing (JPEG)
+router.get(
+  '/:id/signers/:order/photo',
+  handle(async (req, res) => {
+    const contract = await loadContract(req.params.id, req.user.organisationId)
+    await sendSignerPhoto(res, contract.id, req.params.order)
   }),
 )
 
