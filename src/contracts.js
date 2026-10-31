@@ -1,5 +1,6 @@
 import { binary, query, text, transaction, t } from './db.js'
 import { checkPdf } from './pdf.js'
+import { reverseGeocode } from './geocode.js'
 import { STATUS_SQL, inviteNext, issueLink, logEvent, sha256 } from './signing.js'
 import { EMAIL_RE, HttpError, badRequest, computeExpiry, newId, notFound, requireString, parseJson } from './utils.js'
 
@@ -87,7 +88,24 @@ export async function loadContracts(where, params) {
 export async function loadContract(id, orgId) {
   const [contract] = await loadContracts('c.Id = @id AND c.OrganisationId = @orgId', { id, orgId })
   if (!contract) throw notFound('Contract')
+  await fillMissingAddresses(contract)
   return contract
+}
+
+// A location saved without its address (the lookup failed, or it was signed before addresses existed) gets
+// one the next time the contract is opened
+async function fillMissingAddresses(contract) {
+  const missing = contract.signers.filter((s) => s.location && !s.location.address && Number.isFinite(s.location.lat)).slice(0, 3)
+  for (const s of missing) {
+    const address = await reverseGeocode(s.location.lat, s.location.lng)
+    if (!address) continue
+    await query(`UPDATE ${t.ContractSigners} SET LocationAddress = @address WHERE ContractId = @id AND SignerOrder = @order AND LocationAddress IS NULL`, {
+      id: contract.id,
+      order: s.order,
+      address,
+    })
+    s.location.address = address
+  }
 }
 
 // Stops an open contract; links stop working for everyone
