@@ -136,6 +136,29 @@ export async function sendOtpEmail({ to, name, code, purpose }) {
   await deliver(`${purpose} code`, to, message)
 }
 
+// One-time code a signer enters before signing (Smart eSign)
+export async function sendSigningOtp({ to, name, code, contractName, minutes }) {
+  const text = `Hi ${name || 'there'},
+
+Use this code to sign "${contractName}":
+
+    ${code}
+
+The code expires in ${minutes} minutes. Never share it with anyone.`
+  const html = layout({
+    body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name || 'there')},</p>
+          <p style="margin:0 0 20px">Use this code to sign <b>${escapeHtml(contractName)}</b>:</p>
+          <div style="font-size:32px;font-weight:700;letter-spacing:10px;text-align:center;background:#f4f3fb;border-radius:10px;padding:16px 0;color:#1a1630">${code}</div>
+          <p style="margin:20px 0 0;color:#6d6887;font-size:13px">This code expires in ${minutes} minutes. Never share it with anyone.</p>`,
+  })
+  if (!transport) {
+    console.log(`\n[mail:dev] SIGNING code for ${to}: ${code}  (expires in ${minutes} min)`)
+    console.log(`[mail:dev] ${stamp()}  NOT SENT  no SMTP configured; the code above was not emailed to ${to}\n`)
+    return
+  }
+  await deliver('signing code', to, { subject: `${code} is your signing code`, text, html })
+}
+
 // Sends through SMTP, or prints a summary in the console when no SMTP server is configured.
 // Resolves true when the email was handed to the mail server, false when it was only printed.
 async function send(kind, to, message, devLines) {
@@ -150,7 +173,7 @@ async function send(kind, to, message, devLines) {
 }
 
 // Invitation with the signer's (or reviewer's) private link
-export async function sendSigningInvite({ to, name, contractName, orgName, senderName, link, expiresAt, subject, review = false }) {
+export async function sendSigningInvite({ to, name, contractName, orgName, senderName, link, expiresAt, subject, review = false, howToSign = '' }) {
   const from = senderName ? `${senderName} (${orgName})` : orgName
   const task = review ? 'review and approve before it is sent for signing' : 'review and sign electronically'
   const verb = review ? 'respond' : 'sign'
@@ -159,7 +182,7 @@ export async function sendSigningInvite({ to, name, contractName, orgName, sende
 ${from} has sent you "${contractName}" to ${task}.
 
 Open the document: ${link}
-
+${howToSign ? `\n${howToSign}\n` : ''}
 This link is personal to you; please don't forward it. Please ${verb} before ${formatDate(expiresAt)}.`
   const html = layout({
     body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name)},</p>
@@ -168,7 +191,7 @@ This link is personal to you; please don't forward it. Please ${verb} before ${f
             <div style="font-size:12px;color:#6d6887;text-transform:uppercase;letter-spacing:.05em">Document</div>
             <div style="font-weight:700;font-size:16px">${escapeHtml(contractName)}</div>
             <div style="font-size:13px;color:#6d6887;margin-top:4px">Please ${verb} before ${escapeHtml(formatDate(expiresAt))}</div>
-          </div>`,
+          </div>${howToSign ? `<p style="margin:14px 0 0;font-size:14px">${escapeHtml(howToSign)}</p>` : ''}`,
     button: { label: review ? 'Review document' : 'Review & sign', href: link },
     footer: 'This link is personal to you. Please do not forward this email.',
   })

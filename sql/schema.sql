@@ -370,3 +370,39 @@ GO
 IF COL_LENGTH(N'eSign.ContractSigners', N'Phone') IS NULL
   ALTER TABLE eSign.ContractSigners ADD Phone NVARCHAR(20) NULL;
 GO
+
+/* ---------- 005: signing methods (see sql/migrations/005_signing_methods.sql) ---------- */
+IF COL_LENGTH(N'eSign.ContractSigners', N'Methods') IS NULL
+  ALTER TABLE eSign.ContractSigners ADD Methods NVARCHAR(300) NULL;
+GO
+IF COL_LENGTH(N'eSign.ContractSigners', N'SignedMethod') IS NULL
+  ALTER TABLE eSign.ContractSigners ADD SignedMethod NVARCHAR(40) NULL;
+GO
+IF COL_LENGTH(N'eSign.ContractSigners', N'Verification') IS NULL
+  ALTER TABLE eSign.ContractSigners ADD Verification NVARCHAR(500) NULL;
+GO
+IF COL_LENGTH(N'eSign.ContractSigners', N'VerificationJson') IS NULL
+  ALTER TABLE eSign.ContractSigners ADD VerificationJson NVARCHAR(MAX) NULL;
+GO
+UPDATE eSign.ContractSigners SET Methods = Method WHERE Methods IS NULL AND Method IS NOT NULL;
+GO
+
+IF OBJECT_ID(N'eSign.SigningChallenges', N'U') IS NULL
+CREATE TABLE eSign.SigningChallenges (
+  Id           NVARCHAR(32)   NOT NULL CONSTRAINT PK_SigningChallenges PRIMARY KEY,
+  ContractId   NVARCHAR(32)   NOT NULL CONSTRAINT FK_SigningChallenges_Contracts REFERENCES eSign.Contracts (Id) ON DELETE CASCADE,
+  SignerOrder  INT            NOT NULL,
+  Method       NVARCHAR(40)   NOT NULL,
+  CodeHash     NVARCHAR(64)   NULL,      -- OTP methods only
+  Target       NVARCHAR(200)  NULL,      -- where the code went / which Aadhaar (masked)
+  DetailJson   NVARCHAR(MAX)  NULL,
+  Attempts     INT            NOT NULL CONSTRAINT DF_SigningChallenges_Attempts DEFAULT 0,
+  CreatedAt    DATETIME2(0)   NOT NULL CONSTRAINT DF_SigningChallenges_CreatedAt DEFAULT SYSUTCDATETIME(),
+  ExpiresAt    DATETIME2(0)   NOT NULL,
+  VerifiedAt   DATETIME2(0)   NULL,
+  UsedAt       DATETIME2(0)   NULL
+);
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_SigningChallenges_Signer' AND object_id = OBJECT_ID(N'eSign.SigningChallenges'))
+  CREATE INDEX IX_SigningChallenges_Signer ON eSign.SigningChallenges (ContractId, SignerOrder, CreatedAt);
+GO

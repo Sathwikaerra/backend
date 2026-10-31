@@ -51,6 +51,8 @@ function apiContract(c, links = {}) {
       declinedAt: s.declinedAt,
       declineReason: s.declineReason,
       reviewComment: s.reviewComment,
+      signedWith: s.signedMethod ?? null,
+      verification: s.verification ?? null,
       ...(links[s.order] ? { signingLink: links[s.order] } : {}),
     })),
   }

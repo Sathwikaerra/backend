@@ -4,7 +4,7 @@ import { config } from './config.js'
 let poolPromise = null
 
 // Fully qualified table names, e.g. t.Users -> [eSign].[Users]. Use these in every query.
-const TABLES = ['Organisations', 'Users', 'Workflows', 'WorkflowFiles', 'WorkflowVersions', 'Templates', 'Contracts', 'ContractSigners', 'ContractDocuments', 'ContractEvents', 'EmailOtps', 'ApiKeys', 'Webhooks', 'WebhookDeliveries']
+const TABLES = ['Organisations', 'Users', 'Workflows', 'WorkflowFiles', 'WorkflowVersions', 'Templates', 'Contracts', 'ContractSigners', 'ContractDocuments', 'ContractEvents', 'EmailOtps', 'ApiKeys', 'Webhooks', 'WebhookDeliveries', 'SigningChallenges']
 export const t = Object.freeze(Object.fromEntries(TABLES.map((name) => [name, `[${config.db.schema}].[${name}]`])))
 
 // One shared connection pool for the whole API, created on first use.

@@ -205,3 +205,26 @@ To try webhooks without writing a receiver, set the webhook URL to `http://local
 It plays the part of a loan system: it checks the signature, logs each event in the console, and on `completed` saves the
 signed PDF to `backend/webhook-inbox/<externalRef>-signed.pdf`. `GET /api/webhook-receiver` (signed in) lists the latest
 events it received for your organisation. They are kept in memory only, so a restart clears them.
+
+## Signing methods
+
+Each signer is asked to verify themselves with the method(s) the workflow gives them, in a window of its own on the
+signing page (`POST /api/sign/:token/verify/start` then `/verify/complete`; `/sign` spends the verified check):
+
+| Method | What the signer does | Signature |
+|---|---|---|
+| `CLICKWRAP` | Types their name and clicks "I agree" | Generated stamp |
+| `SMART_ESIGN` | Enters a code emailed to them (texted too when a phone is known; SMS prints to the console for now) | Drawn or typed |
+| `AADHAAR_OTP` | Aadhaar number + consent, then the OTP sent to the Aadhaar-linked mobile | Generated stamp with masked Aadhaar |
+| `AADHAAR_FINGERPRINT` | Aadhaar number + consent, then a fingerprint scan | Generated stamp |
+| `AADHAAR_FACE` | Aadhaar number + consent, then a live photo from the camera (kept with the audit record) | Generated stamp |
+| `DSC_TOKEN` | Picks the certificate on their USB token and enters its PIN | Generated stamp |
+
+`ESIGN_MODE=sandbox` (the default) imitates the Aadhaar eSign provider and the DSC token: the Aadhaar OTP is shown on the
+page and printed in the console, any fingerprint or photo is accepted and the token holds one test certificate. Signatures
+made this way say `[sandbox]` in the certificate. Real Aadhaar eSign needs a licensed eSign Service Provider (ESP) and real
+DSC signing needs the signer's token utility; they plug into `provider` in `src/verification.js`. Until then
+`ESIGN_MODE=live` turns those methods off (HTTP 501).
+
+The certificate of completion and `GET /api/v1/contracts/:id` (`signedWith`, `verification`) show the method used and what
+was checked. Only a hash of an OTP and the last 4 digits of an Aadhaar number are stored.

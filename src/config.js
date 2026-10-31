@@ -34,6 +34,8 @@ export const config = {
     password: process.env.SMTP_PASSWORD || '',
     from: process.env.MAIL_FROM || 'eSign Doc Builder <no-reply@localhost>',
   },
+  // Signing methods: 'sandbox' imitates the Aadhaar eSign provider and DSC tokens; 'live' needs a real provider
+  esign: { mode: (process.env.ESIGN_MODE || 'sandbox').toLowerCase() },
   otp: {
     length: 6,
     expiryMinutes: Number(process.env.OTP_EXPIRY_MINUTES) || 5,

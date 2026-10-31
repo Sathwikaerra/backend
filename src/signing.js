@@ -22,6 +22,22 @@ export const METHOD_LABELS = {
   DSC_TOKEN: 'DSC Token',
 }
 
+// Told to signers in the invitation so they have what the method needs at hand
+const METHOD_HINTS = {
+  AADHAAR_OTP: 'Aadhaar eSign (OTP): keep your Aadhaar number and the mobile linked to it ready.',
+  AADHAAR_FINGERPRINT: 'Aadhaar eSign (fingerprint): keep your Aadhaar number and a fingerprint scanner ready.',
+  AADHAAR_FACE: 'Aadhaar eSign (face authentication): keep your Aadhaar number ready and use a device with a camera.',
+  CLICKWRAP: 'Clickwrap: you will accept the document by typing your name and clicking "I agree".',
+  SMART_ESIGN: 'Smart eSign: we will email you a one-time code to confirm it is you.',
+  DSC_TOKEN: 'DSC token: plug in your USB signing token and keep its PIN ready.',
+}
+export function howToSign(methods) {
+  const list = String(methods || '').split(',').filter((m) => METHOD_HINTS[m])
+  if (!list.length) return ''
+  if (list.length === 1) return `How you will sign: ${METHOD_HINTS[list[0]]}`
+  return `You can sign with: ${list.map((m) => METHOD_LABELS[m]).join(', ')}.`
+}
+
 export const hashToken = (token) => crypto.createHash('sha256').update(String(token)).digest('hex')
 export const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex')
 
@@ -76,7 +92,7 @@ export async function issueLink(contractId, order, req) {
  */
 export async function inviteSigner(contractId, order, req, { reminder = false } = {}) {
   const c = await contractForMail(contractId)
-  const [s] = await query(`SELECT SignerOrder, Name, Email, Kind FROM ${t.ContractSigners} WHERE ContractId = @contractId AND SignerOrder = @order`, {
+  const [s] = await query(`SELECT SignerOrder, Name, Email, Kind, COALESCE(Methods, Method) AS Methods FROM ${t.ContractSigners} WHERE ContractId = @contractId AND SignerOrder = @order`, {
     contractId,
     order,
   })
@@ -99,6 +115,7 @@ export async function inviteSigner(contractId, order, req, { reminder = false } 
       expiresAt: c.ExpiresAt,
       subject: c.EmailSubject,
       review: s.Kind === 'reviewer',
+      howToSign: s.Kind === 'reviewer' ? '' : howToSign(s.Methods),
     })
     if (!result.emailed) result.error = 'Email is not set up on the server (SMTP_HOST is empty), so the link was only printed in the backend console.'
   } catch (err) {
@@ -173,7 +190,7 @@ async function loadForPdf(contractId) {
     { contractId },
   )
   const signers = await query(
-    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
+    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedMethod, Verification, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
      FROM ${t.ContractSigners} WHERE ContractId = @contractId ORDER BY SignerOrder`,
     { contractId },
   )
@@ -313,7 +330,9 @@ export async function buildSignedPdf(contractId) {
     const top = y
     line(`${i + 1}. ${s.Name}`, { size: 11, f: bold, gap: 5 })
     line(`Email: ${s.Email}`)
-    line(`Method: ${METHOD_LABELS[s.Method] ?? s.Method ?? 'Electronic signature'} (${s.SignatureType === 'type' ? 'typed' : 'drawn'} signature)`)
+    const look = s.SignatureType === 'stamp' ? 'generated' : s.SignatureType === 'type' ? 'typed' : 'drawn'
+    line(`Method: ${METHOD_LABELS[s.SignedMethod ?? s.Method] ?? s.SignedMethod ?? s.Method ?? 'Electronic signature'} (${look} signature)`)
+    if (s.Verification) line(`Verification: ${s.Verification.slice(0, 110)}`)
     line(`Invited: ${fmt(s.InvitedAt)}    Viewed: ${fmt(s.ViewedAt)}`)
     line(`Signed: ${fmt(s.SignedAt)}    IP address: ${s.SignedIp ?? '-'}`)
     line(`Device: ${(s.SignedUserAgent ?? '-').slice(0, 110)}`, { size: 7.5, color: grey, gap: 10 })

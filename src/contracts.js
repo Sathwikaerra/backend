@@ -13,7 +13,7 @@ export async function loadContracts(where, params) {
   const rows = await query(
     `SELECT c.Id, c.WorkflowId, c.Name, c.WorkflowName, c.Estamping, c.SigningMethod, ${STATUS_SQL} AS Status,
             c.CreatedAt, c.ExpiresAt, c.CompletedAt, c.CancelledAt, c.Source, c.ExternalRef, c.Notify,
-            s.SignerOrder, s.Kind, s.Name AS SignerName, s.Email, s.Phone, s.Method, s.Signed, s.SignedAt,
+            s.SignerOrder, s.Kind, s.Name AS SignerName, s.Email, s.Phone, s.Method, s.SignedMethod, s.Verification, s.Signed, s.SignedAt,
             s.InvitedAt, s.ViewedAt, s.DeclinedAt, s.DeclineReason, s.ReviewComment
      FROM ${t.Contracts} c
      LEFT JOIN ${t.ContractSigners} s ON s.ContractId = c.Id
@@ -53,6 +53,8 @@ export async function loadContracts(where, params) {
         email: r.Email,
         phone: r.Phone,
         method: r.Method,
+        signedMethod: r.SignedMethod,
+        verification: r.Verification,
         signed: !!r.Signed,
         signedAt: r.SignedAt,
         invitedAt: r.InvitedAt,
@@ -99,7 +101,7 @@ function cleanPeople(list, roles, label) {
       phone = String(p.phone).replace(/[\s()-]/g, '')
       if (!PHONE_RE.test(phone)) throw badRequest(`Phone of ${label} ${i + 1} must be 8-15 digits, optionally starting with +`)
     }
-    return { name: requireString(p?.name, `Name of ${label} ${i + 1}`), email, phone, method: roles[i].methods?.[0] ?? null, roleId: String(roles[i].id) }
+    return { name: requireString(p?.name, `Name of ${label} ${i + 1}`), email, phone, method: roles[i].methods?.[0] ?? null, methods: (roles[i].methods ?? []).join(',') || null, roleId: String(roles[i].id) }
   })
 }
 
@@ -145,7 +147,7 @@ export async function createContract(
   const file = document ? await cleanDocument(document, boxes) : wf.Data ? { fileName: wf.FileName, data: wf.Data } : null
   if (!file) throw new HttpError(409, 'This workflow has no document. Upload a PDF to it, or send one in the request.')
 
-  const reviewerList = cleanPeople(reviewers, participants.filter((p) => p.kind === 'reviewer'), 'reviewer').map((r) => ({ ...r, method: null, kind: 'reviewer' }))
+  const reviewerList = cleanPeople(reviewers, participants.filter((p) => p.kind === 'reviewer'), 'reviewer').map((r) => ({ ...r, method: null, methods: null, kind: 'reviewer' }))
   const signerList = cleanPeople(signers, participants.filter((p) => p.kind === 'signer'), 'signer').map((s) => ({ ...s, kind: 'signer' }))
   const clean = [...reviewerList, ...signerList]
   if (new Set(clean.map((s) => s.email)).size !== clean.length) throw badRequest('Each reviewer and signer needs a different email address')
@@ -194,8 +196,8 @@ export async function createContract(
     )
     for (const [i, s] of clean.entries()) {
       await run(
-        `INSERT INTO ${t.ContractSigners} (ContractId, SignerOrder, RoleId, Kind, Name, Email, Phone, Method)
-         VALUES (@id, @order, @roleId, @kind, @name, @email, @phone, @method)`,
+        `INSERT INTO ${t.ContractSigners} (ContractId, SignerOrder, RoleId, Kind, Name, Email, Phone, Method, Methods)
+         VALUES (@id, @order, @roleId, @kind, @name, @email, @phone, @method, @methods)`,
         { id, order: i + 1, ...s },
       )
     }

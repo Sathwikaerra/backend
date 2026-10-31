@@ -1,14 +1,17 @@
 import { Router } from 'express'
 import { query, text, transaction, t } from '../db.js'
 import { sendSigningDeclined } from '../mailer.js'
-import { STATUS_SQL, ensureSignedDocument, finalizeContract, hashToken, inviteNext, logEvent } from '../signing.js'
+import { METHOD_LABELS, STATUS_SQL, ensureSignedDocument, finalizeContract, hashToken, inviteNext, logEvent } from '../signing.js'
 import { HttpError, badRequest, handle, notFound, parseJson } from '../utils.js'
+import { allowedMethods, completeVerification, sandbox, startVerification, useVerification } from '../verification.js'
 
 /*
  * Public signing API. No login: the link token in the URL identifies the signer.
  *   GET  /api/sign/:token            -> what this signer sees (document info, their boxes, progress)
  *   GET  /api/sign/:token/document   -> the PDF (the signed one once everyone has signed)
- *   POST /api/sign/:token/sign       -> { signature, type, consent } adopts the signature and signs
+ *   POST /api/sign/:token/verify/start     -> { method, aadhaar?, consent? } begins the identity check for a signing method
+ *   POST /api/sign/:token/verify/complete  -> { challengeId, code? | capture? | certificateId + pin } finishes it
+ *   POST /api/sign/:token/sign       -> { signature, type, consent, method, challengeId?, acceptedName? } signs
  *   POST /api/sign/:token/approve    -> { comment? } a reviewer approves; signers are invited once all reviewers have
  *   POST /api/sign/:token/decline    -> { reason } declines (a reviewer: rejects) and stops the contract
  */
@@ -18,7 +21,7 @@ const MAX_SIGNATURE_CHARS = 700_000
 async function findSigner(token) {
   if (typeof token !== 'string' || token.length < 20 || token.length > 100) throw notFound('Signing link')
   const [row] = await query(
-    `SELECT s.ContractId, s.SignerOrder, s.RoleId, s.Kind, s.Name, s.Email, s.Signed, s.SignedAt, s.DeclinedAt, s.ViewedAt,
+    `SELECT s.ContractId, s.SignerOrder, s.RoleId, s.Kind, s.Name, s.Email, s.Phone, s.Method, s.Methods, s.SignedMethod, s.Verification, s.Signed, s.SignedAt, s.DeclinedAt, s.ViewedAt,
             c.Name AS ContractName, c.SigningMethod, c.ExpiresAt, c.CompletedAt, c.BoxesJson, c.ParticipantsJson, c.CreatedBy,
             ${STATUS_SQL} AS Status, o.Name AS OrgName, u.Name AS SenderName, u.Email AS SenderEmail
      FROM ${t.ContractSigners} s
@@ -89,7 +92,20 @@ async function signingView(me) {
       completedAt: me.CompletedAt,
     },
     // kind 'reviewer': canSign means the reviewer may approve or reject now
-    me: { order: me.SignerOrder, kind: me.Kind, name: me.Name, email: me.Email, status: signerStatus(me), signedAt: me.SignedAt },
+    me: {
+      order: me.SignerOrder,
+      kind: me.Kind,
+      name: me.Name,
+      email: me.Email,
+      status: signerStatus(me),
+      signedAt: me.SignedAt,
+      // How this signer may sign; each method has its own identity check on the page
+      methods: me.Kind === 'reviewer' ? [] : allowedMethods(me),
+      signedMethod: me.SignedMethod,
+      verification: me.Verification,
+    },
+    // Aadhaar and DSC checks are imitated (no UIDAI / token connection)
+    sandbox,
     canSign: !me.Signed && !me.DeclinedAt && !blockedReason && me.Status === 'incomplete',
     blockedReason: me.Signed || me.DeclinedAt ? null : blockedReason,
     signers: signers.map((s) => ({ order: s.SignerOrder, kind: s.Kind, name: s.Name, status: signerStatus(s), signedAt: s.SignedAt })),
@@ -137,23 +153,60 @@ router.get(
   }),
 )
 
-// POST /api/sign/:token/sign  { signature: "data:image/png;base64,...", type: "draw" | "type", consent: true }
+// Identity checks happen only while this signer may sign
+async function signerWhoCanSign(token) {
+  const me = await findSigner(token)
+  if (me.Kind === 'reviewer') throw new HttpError(409, 'Reviewers approve the document instead of signing it.')
+  const view = await signingView(me)
+  if (!view.canSign) throw new HttpError(409, view.blockedReason || 'This document cannot be signed right now.')
+  return me
+}
+
+// POST /api/sign/:token/verify/start  { method, aadhaar?, consent? }
+router.post(
+  '/:token/verify/start',
+  handle(async (req, res) => {
+    res.json(await startVerification(await signerWhoCanSign(req.params.token), req.body))
+  }),
+)
+
+// POST /api/sign/:token/verify/complete  { challengeId, code? | capture? | certificateId + pin }
+router.post(
+  '/:token/verify/complete',
+  handle(async (req, res) => {
+    res.json(await completeVerification(await signerWhoCanSign(req.params.token), req.body))
+  }),
+)
+
+/*
+ * POST /api/sign/:token/sign
+ *   { signature: "data:image/png;base64,...", type: "draw" | "type" | "stamp", consent: true,
+ *     method, challengeId (after /verify for every method but Clickwrap), acceptedName (Clickwrap) }
+ */
 router.post(
   '/:token/sign',
   handle(async (req, res) => {
     const me = await findSigner(req.params.token)
-    const { signature, type, consent } = req.body ?? {}
+    const { signature, type, consent, method, challengeId, acceptedName } = req.body ?? {}
     if (consent !== true) throw badRequest('Please agree to sign electronically')
-    if (!['draw', 'type'].includes(type)) throw badRequest('Signature type must be draw or type')
+    if (!['draw', 'type', 'stamp'].includes(type)) throw badRequest('Signature type must be draw, type or stamp')
     if (typeof signature !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature)) throw badRequest('The signature image is not valid')
     if (signature.length > MAX_SIGNATURE_CHARS) throw badRequest('The signature image is too large')
 
     if (me.Kind === 'reviewer') throw new HttpError(409, 'Reviewers approve the document instead of signing it.')
+    const adopted = type === 'stamp' ? 'Signature generated by the signing method' : `${type === 'type' ? 'Typed' : 'Drew'} and adopted a signature`
     await complete(me, req, {
-      set: 'SignatureType = @type, SignatureImage = @signature',
+      set: 'SignatureType = @type, SignatureImage = @signature, SignedMethod = @method, Verification = @verification, VerificationJson = @evidence',
       params: { type, signature: text(signature) },
       event: 'signed',
-      detail: `${type === 'type' ? 'Typed' : 'Drew'} and adopted a signature`,
+      // Spends the identity check in the same transaction, so one check signs once
+      verify: async (run) => {
+        const v = await useVerification(run, me, { method, challengeId, acceptedName })
+        return {
+          params: { method: v.method, verification: v.summary.slice(0, 500), evidence: text(JSON.stringify(v.evidence)) },
+          detail: `${METHOD_LABELS[v.method]}: ${v.summary}. ${adopted}`,
+        }
+      },
     })
     res.json(await signingView(await findSigner(req.params.token)))
   }),
@@ -180,7 +233,7 @@ router.post(
  * Marks a signer as signed (or a reviewer as approved), then either finishes the contract or
  * invites whoever is next. `set` adds columns to the update.
  */
-async function complete(me, req, { set, params, event, detail }) {
+async function complete(me, req, { set, params, event, detail, verify }) {
   const view = await signingView(me)
   const done = me.Kind === 'reviewer' ? 'approved' : 'signed'
   if (me.Signed) throw new HttpError(409, `You have already ${done} this document.`)
@@ -188,6 +241,11 @@ async function complete(me, req, { set, params, event, detail }) {
   if (!view.canSign) throw new HttpError(409, view.blockedReason || 'This document cannot be completed right now.')
 
   const completed = await transaction(async (run) => {
+    if (verify) {
+      const extra = await verify(run)
+      params = { ...params, ...extra.params }
+      detail = extra.detail
+    }
     const updated = await run(
       `UPDATE ${t.ContractSigners}
        SET Signed = 1, SignedAt = SYSUTCDATETIME(), SignedIp = @ip, SignedUserAgent = @agent, ${set}
