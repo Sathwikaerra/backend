@@ -216,6 +216,23 @@ export async function completeVerification(me, body) {
 }
 
 /*
+ * Signers see the document only after their identity check (Clickwrap signers read it first and
+ * accept at the end). True when this signer may open the PDF with this verified, unspent check.
+ */
+export async function mayViewDocument(me, challengeId) {
+  if (me.Kind === 'reviewer' || me.Signed || me.DeclinedAt || me.Status !== 'incomplete') return true
+  if (allowedMethods(me).includes('CLICKWRAP')) return true
+  if (!challengeId) return false
+  const [ch] = await query(
+    `SELECT Id FROM ${t.SigningChallenges}
+     WHERE Id = @id AND ContractId = @contractId AND SignerOrder = @order
+       AND VerifiedAt IS NOT NULL AND UsedAt IS NULL AND VerifiedAt > DATEADD(MINUTE, -${VERIFIED_VALID_MINUTES}, SYSUTCDATETIME())`,
+    { id: String(challengeId), contractId: me.ContractId, order: me.SignerOrder },
+  )
+  return !!ch
+}
+
+/*
  * Called inside the signing transaction: checks the method and spends its verification.
  * Returns { method, summary, evidence } for the signer row and the audit trail.
  */

@@ -3,12 +3,13 @@ import { query, text, transaction, t } from '../db.js'
 import { sendSigningDeclined } from '../mailer.js'
 import { METHOD_LABELS, STATUS_SQL, ensureSignedDocument, finalizeContract, hashToken, inviteNext, logEvent } from '../signing.js'
 import { HttpError, badRequest, handle, notFound, parseJson } from '../utils.js'
-import { allowedMethods, completeVerification, sandbox, startVerification, useVerification } from '../verification.js'
+import { allowedMethods, completeVerification, mayViewDocument, sandbox, startVerification, useVerification } from '../verification.js'
 
 /*
  * Public signing API. No login: the link token in the URL identifies the signer.
  *   GET  /api/sign/:token            -> what this signer sees (document info, their boxes, progress)
- *   GET  /api/sign/:token/document   -> the PDF (the signed one once everyone has signed)
+ *   GET  /api/sign/:token/document   -> the PDF (the signed one once everyone has signed); signers who still have to
+ *                                       sign pass ?challengeId= of their verified identity check
  *   POST /api/sign/:token/verify/start     -> { method, aadhaar?, consent? } begins the identity check for a signing method
  *   POST /api/sign/:token/verify/complete  -> { challengeId, code? | capture? | certificateId + pin } finishes it
  *   POST /api/sign/:token/sign       -> { signature, type, consent, method, challengeId?, acceptedName? } signs
@@ -138,6 +139,7 @@ router.get(
   '/:token/document',
   handle(async (req, res) => {
     const me = await findSigner(req.params.token)
+    if (!(await mayViewDocument(me, req.query.challengeId))) throw new HttpError(403, 'Verify your identity to open the document')
     let file
     if (me.Status === 'completed') {
       const signed = await ensureSignedDocument(me.ContractId)
