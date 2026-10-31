@@ -45,6 +45,11 @@ export const config = {
     // Codes one email address may request per 15 minutes
     maxPerWindow: 8,
   },
+  // Address of the signer's GPS location: 'nominatim' (OpenStreetMap, free), 'google' (needs GOOGLE_MAPS_API_KEY) or 'off'
+  geocode: {
+    provider: (process.env.GEOCODER || 'nominatim').toLowerCase(),
+    googleApiKey: process.env.GOOGLE_MAPS_API_KEY || '',
+  },
   // Template translation. Without a key, Google's free (rate-limited) endpoint is used.
   translate: {
     googleApiKey: process.env.GOOGLE_TRANSLATE_API_KEY || '',

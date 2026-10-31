@@ -417,3 +417,8 @@ GO
 IF COL_LENGTH(N'eSign.ContractSigners', N'PhotoImage') IS NULL
   ALTER TABLE eSign.ContractSigners ADD PhotoImage NVARCHAR(MAX) NULL;
 GO
+
+/* ---------- 007: signer address (see sql/migrations/007_signer_address.sql) ---------- */
+IF COL_LENGTH(N'eSign.ContractSigners', N'LocationAddress') IS NULL
+  ALTER TABLE eSign.ContractSigners ADD LocationAddress NVARCHAR(500) NULL;
+GO

@@ -190,7 +190,7 @@ async function loadForPdf(contractId) {
     { contractId },
   )
   const signers = await query(
-    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedMethod, Verification, LocationJson, PhotoImage, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
+    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedMethod, Verification, LocationJson, LocationAddress, PhotoImage, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
      FROM ${t.ContractSigners} WHERE ContractId = @contractId ORDER BY SignerOrder`,
     { contractId },
   )
@@ -336,7 +336,10 @@ export async function buildSignedPdf(contractId) {
     line(`Invited: ${fmt(s.InvitedAt)}    Viewed: ${fmt(s.ViewedAt)}`)
     line(`Signed: ${fmt(s.SignedAt)}    IP address: ${s.SignedIp ?? '-'}`)
     const loc = s.LocationJson ? JSON.parse(s.LocationJson) : null
-    if (loc) line(`Location: ${loc.lat}, ${loc.lng}${loc.accuracy != null ? ` (within ${loc.accuracy} m)` : ''}    https://maps.google.com/?q=${loc.lat},${loc.lng}`)
+    if (loc) {
+      line(`Location: ${loc.lat}, ${loc.lng}${loc.accuracy != null ? ` (within ${loc.accuracy} m)` : ''}    https://maps.google.com/?q=${loc.lat},${loc.lng}`)
+      if (s.LocationAddress) line(`Address: ${s.LocationAddress.slice(0, 120)}`)
+    }
     line(`Device: ${(s.SignedUserAgent ?? '-').slice(0, 110)}`, { size: 7.5, color: grey, gap: 10 })
     if (s.PhotoImage) {
       // Live photo taken while signing

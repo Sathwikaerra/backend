@@ -25,7 +25,7 @@ export async function loadContracts(where, params) {
   const rows = await query(
     `SELECT c.Id, c.WorkflowId, c.Name, c.WorkflowName, c.Estamping, c.SigningMethod, ${STATUS_SQL} AS Status,
             c.CreatedAt, c.ExpiresAt, c.CompletedAt, c.CancelledAt, c.Source, c.ExternalRef, c.Notify,
-            s.SignerOrder, s.Kind, s.Name AS SignerName, s.Email, s.Phone, s.Method, s.SignedMethod, s.Verification, s.Captures, s.LocationJson,
+            s.SignerOrder, s.Kind, s.Name AS SignerName, s.Email, s.Phone, s.Method, s.SignedMethod, s.Verification, s.Captures, s.LocationJson, s.LocationAddress,
             CASE WHEN s.PhotoImage IS NULL THEN 0 ELSE 1 END AS HasPhoto, s.Signed, s.SignedAt,
             s.InvitedAt, s.ViewedAt, s.DeclinedAt, s.DeclineReason, s.ReviewComment
      FROM ${t.Contracts} c
@@ -68,7 +68,7 @@ export async function loadContracts(where, params) {
         method: r.Method,
         signedMethod: r.SignedMethod,
         captures: r.Captures ? r.Captures.split(',') : [],
-        location: parseJson(r.LocationJson, null),
+        location: r.LocationJson ? { ...parseJson(r.LocationJson, {}), address: r.LocationAddress ?? null } : null,
         hasPhoto: !!r.HasPhoto,
         verification: r.Verification,
         signed: !!r.Signed,

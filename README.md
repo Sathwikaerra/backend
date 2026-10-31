@@ -237,3 +237,9 @@ sign without them (`location: { lat, lng, accuracy }`, `photo: "data:image/jpeg;
 (`LocationJson`, `PhotoImage`), written to the audit trail, and shown on the certificate of completion (coordinates with a
 map link, and the photo). The sender sees them on the contract page; `GET /api/v1/contracts/:id` returns `location` and
 `photoCaptured`, and the photo itself is at `GET /api/v1/contracts/:id/signers/:order/photo`.
+
+The **address** of the location is looked up on the server when the signer signs (`src/geocode.js`) and stored in
+`ContractSigners.LocationAddress` (and `LocationJson.address`). It appears on the signing page, the contract page (click it
+for a map), the audit trail, the certificate and the API (`location.address`). `GEOCODER=nominatim` (default) uses
+OpenStreetMap's free service (max. 1 lookup a second); for production set `GEOCODER=google` and `GOOGLE_MAPS_API_KEY`;
+`GEOCODER=off` keeps coordinates only. A failed lookup never blocks signing.
