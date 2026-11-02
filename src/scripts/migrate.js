@@ -2,11 +2,11 @@
 // Usage: npm run db:migrate
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import sql from 'mssql'
 import { config } from '../config.js'
+import { resolveSql } from '../sqlPath.js'
 
-const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../sql/migrations')
+const dir = resolveSql('migrations')
 const stripComments = (b) => b.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--.*$/gm, '').trim()
 
 try {

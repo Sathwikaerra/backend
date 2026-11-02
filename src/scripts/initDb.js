@@ -1,13 +1,11 @@
 // Creates the schema and all tables from sql/schema.sql inside the EXISTING database DB_NAME.
 // Usage: npm run db:init     (safe to re-run)
 import fs from 'node:fs/promises'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import sql from 'mssql'
 import { config } from '../config.js'
+import { resolveSql } from '../sqlPath.js'
 
-const here = path.dirname(fileURLToPath(import.meta.url))
-const schemaFile = path.resolve(here, '../../sql/schema.sql')
+const schemaFile = resolveSql('schema.sql')
 const { database, schema } = config.db
 
 const stripComments = (b) => b.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--.*$/gm, '').trim()

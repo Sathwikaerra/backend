@@ -279,3 +279,29 @@ Then build the site (`npm run build` in Esign_doc_builder -> `dist/`), run the m
 
 Use **https**: browsers only allow the signer's location and camera on https (or localhost).
 After deploying, change `baseUrl` in the Postman collection and any webhook URLs on the Developers page.
+
+## Obfuscated production build
+
+To hand over a build whose source is hard to read instead of the plain project, run:
+
+```bash
+npm install          # first time, to get the build tools
+npm run build        # bundles src/ into dist/ and obfuscates it
+```
+
+`dist/` then holds the obfuscated `server.js` and the `migrate.js` / `initDb.js` / `pdfToBase64.js` / `mailTest.js`
+scripts, plus `sql/`, a runtime `package.json` (dependencies and scripts only) and `.env.example`. Third-party
+packages are **not** bundled; they are installed from npm on the server.
+
+On the server (from inside `dist/`):
+
+```bash
+npm ci --omit=dev    # install the runtime dependencies
+# create .env here (copy .env.example and fill it in)
+npm run db:migrate   # apply the database migrations
+npm start            # start the API (keep it running with pm2 / NSSM)
+```
+
+This is **obfuscation, not encryption**: Node still executes the code, so it can be made hard to read but never
+truly hidden. Do not ship `.env` (it holds your secrets) or `webpack.config.js`. For stronger (slower) obfuscation,
+turn on `controlFlowFlattening` and `deadCodeInjection` in `webpack.config.js`.
