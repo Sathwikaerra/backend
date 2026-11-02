@@ -261,11 +261,11 @@ Nothing else in the code points at `localhost`.
 | `JWT_SECRET` | anything | a long random string |
 | `DB_*`, `SMTP_*` | your dev servers | the production database and mail server |
 
-**Esign_doc_builder/.env.production** (read by `npm run build`, built into the site)
+**Esign_doc_builder/.env**: one setting, `VITE_API_URL`, the backend address (built into the site by `npm run build`)
 
 | Setting | Same address (options A, B) | Different addresses (option C) |
 |---|---|---|
-| `VITE_API_URL` | empty (calls `/api` on the same address) | `https://api.yourcompany.com/api` |
+| `VITE_API_URL` | `https://esign.yourcompany.com/api` (or empty: `/api` on the same address) | `https://api.yourcompany.com/api` |
 
 Then build the site (`npm run build` in Esign_doc_builder -> `dist/`), run the migrations on the production database
 (`npm run db:migrate`) and start the API with `npm start` (keep it running with a service manager such as pm2 or NSSM).
