@@ -1,3 +1,5 @@
+import path from 'node:path'
+import fs from 'node:fs'
 import express from 'express'
 import cors from 'cors'
 import { config } from './config.js'
@@ -16,8 +18,8 @@ import webhookReceiverRoutes from './routes/webhookReceiver.js'
 export function createApp() {
   const app = express()
   app.disable('x-powered-by')
-  // Requests arrive through the Vite proxy in development; trust it for the client IP
-  app.set('trust proxy', 'loopback')
+  // Requests arrive through a proxy (Vite in development, nginx / IIS when deployed); trust it for the client IP
+  app.set('trust proxy', config.trustProxy)
   app.use(cors({ origin: config.corsOrigins }))
   // Sample webhook receiver; mounted before the JSON parser because it checks the signature on the raw body
   app.use('/api/webhook-receiver', webhookReceiverRoutes)
@@ -44,6 +46,17 @@ export function createApp() {
   app.use('/api/v1', requireApiKey, v1Routes)
   // Signers open their emailed link without an account
   app.use('/api/sign', signRoutes)
+
+  // FRONTEND_DIST: serve the built site as well, so one address runs both (anything not under /api gets index.html)
+  if (config.frontendDist) {
+    const dist = path.resolve(config.frontendDist)
+    if (!fs.existsSync(path.join(dist, 'index.html'))) {
+      console.warn(`[app] FRONTEND_DIST=${dist} has no index.html. Run npm run build in the frontend first.`)
+    } else {
+      app.use(express.static(dist, { index: false, maxAge: '1h' }))
+      app.get(/^\/(?!api(\/|$)).*/, (_req, res) => res.sendFile(path.join(dist, 'index.html')))
+    }
+  }
 
   app.use(notFoundRoute)
   app.use(errorHandler)

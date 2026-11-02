@@ -1,9 +1,22 @@
 import 'dotenv/config'
 
+function parseTrustProxy(v) {
+  const s = String(v).trim()
+  if (s === 'true') return true
+  if (s === 'false' || s === '') return false
+  return /^\d+$/.test(s) ? Number(s) : s
+}
+
 const bool = (v, fallback) => (v === undefined || v === '' ? fallback : ['1', 'true', 'yes'].includes(String(v).toLowerCase()))
 
 export const config = {
   port: Number(process.env.PORT) || 4000,
+  production: process.env.NODE_ENV === 'production',
+  // Reverse proxies (nginx, IIS, a load balancer) in front of the API: needed for the real client IP in the audit trail.
+  // 'loopback' trusts a proxy on the same machine; use a number of hops (e.g. 1) or the proxy's IP otherwise.
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY ?? 'loopback'),
+  // Optional: folder of the built frontend (npm run build -> dist). The API then serves the site too, on one address.
+  frontendDist: (process.env.FRONTEND_DIST || '').trim(),
   // Public address of the frontend, used in signing links. Empty: the browser's origin when it is a CORS origin.
   appUrl: (process.env.APP_URL || '').replace(/\/$/, ''),
   corsOrigins: (process.env.CORS_ORIGIN || 'http://localhost:5173')
@@ -63,6 +76,10 @@ export const config = {
 // The schema name is put into SQL text, so only allow a plain identifier
 if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(config.db.schema)) {
   throw new Error(`DB_SCHEMA "${config.db.schema}" must be a plain name (letters, numbers, underscores).`)
+}
+
+if (config.production && !config.appUrl) {
+  console.warn('[config] APP_URL is not set. Set it to the public address of the site (e.g. https://esign.example.com) so emailed signing links point there.')
 }
 
 if (!config.jwt.secret ||config.jwt.secret === 'change-me-to-a-long-random-string') {

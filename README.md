@@ -243,3 +243,39 @@ The **address** of the location is looked up on the server when the signer signs
 for a map), the audit trail, the certificate and the API (`location.address`). `GEOCODER=nominatim` (default) uses
 OpenStreetMap's free service (max. 1 lookup a second); for production set `GEOCODER=google` and `GOOGLE_MAPS_API_KEY`;
 `GEOCODER=off` keeps coordinates only. A failed lookup never blocks signing.
+
+## Deploying
+
+Everything that changes between your PC and a server is in the two `.env` files (see `.env.example` in each repo).
+Nothing else in the code points at `localhost`.
+
+**backend/.env** (on the server)
+
+| Setting | Development | Deployed |
+|---|---|---|
+| `NODE_ENV` | `development` | `production` |
+| `APP_URL` | empty | `https://esign.yourcompany.com`: the address in every emailed signing link |
+| `CORS_ORIGIN` | `http://localhost:5173` | the site's address (only matters when site and API are on different addresses) |
+| `TRUST_PROXY` | `loopback` | `loopback` if nginx/IIS runs on the same server, `1` behind one remote proxy / load balancer |
+| `FRONTEND_DIST` | empty | `../Esign_doc_builder/dist` to let the API serve the site (option A) |
+| `JWT_SECRET` | anything | a long random string |
+| `DB_*`, `SMTP_*` | your dev servers | the production database and mail server |
+
+**Esign_doc_builder/.env.production** (read by `npm run build`, built into the site)
+
+| Setting | Same address (options A, B) | Different addresses (option C) |
+|---|---|---|
+| `VITE_API_URL` | empty (calls `/api` on the same address) | `https://api.yourcompany.com/api` |
+
+Then build the site (`npm run build` in Esign_doc_builder -> `dist/`), run the migrations on the production database
+(`npm run db:migrate`) and start the API with `npm start` (keep it running with a service manager such as pm2 or NSSM).
+
+- **A. One process:** set `FRONTEND_DIST`; the API on port 4000 serves the site and `/api`. Put https in front of it
+  (nginx, IIS, a cloud load balancer) and point `APP_URL` at that https address.
+- **B. Web server + API:** nginx / IIS serves `dist/` and forwards `/api` to `http://localhost:4000`.
+  Unknown paths must fall back to `index.html` (signing links like `/sign/...` are app routes).
+- **C. Separate addresses:** site on `https://esign.yourcompany.com`, API on `https://api.yourcompany.com`:
+  set `VITE_API_URL` before building and put the site's address in `CORS_ORIGIN`.
+
+Use **https**: browsers only allow the signer's location and camera on https (or localhost).
+After deploying, change `baseUrl` in the Postman collection and any webhook URLs on the Developers page.

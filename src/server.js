@@ -6,7 +6,9 @@ import { verifyMailer } from './mailer.js'
 const app = createApp()
 
 app.listen(config.port, () => {
-  console.log(`eSign API listening on http://localhost:${config.port}/api`)
+  console.log(`eSign API listening on port ${config.port} (http://localhost:${config.port}/api)`)
+  console.log(`Signing links point to ${config.appUrl || 'the frontend that made the request (set APP_URL when deployed)'}`)
+  if (config.frontendDist) console.log(`Serving the site from ${config.frontendDist}`)
   // Connect early so a wrong .env shows up in the console right away
   getPool()
     .then(() => console.log(`Connected to SQL Server database "${config.db.database}" on ${config.db.server}`))
