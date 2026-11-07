@@ -98,18 +98,13 @@ CREATE TABLE eSign.WorkflowVersions (
 );
 GO
 
-/* ---------- Templates (Word-style document + signing setup) ---------- */
+/* ---------- Templates (document content and page setup) ---------- */
 IF OBJECT_ID(N'eSign.Templates', N'U') IS NULL
 CREATE TABLE eSign.Templates (
   Id                NVARCHAR(32)   NOT NULL CONSTRAINT PK_Templates PRIMARY KEY,
   OrganisationId    NVARCHAR(32)   NOT NULL CONSTRAINT FK_Templates_Organisations REFERENCES eSign.Organisations (Id),
   Name              NVARCHAR(200)  NOT NULL,
   Description       NVARCHAR(1000) NULL,
-  SigningMethod     NVARCHAR(20)   NOT NULL CONSTRAINT DF_Templates_SigningMethod DEFAULT N'sequential',
-  StampingMethod    NVARCHAR(40)   NULL,
-  ExpiryValue       INT            NOT NULL CONSTRAINT DF_Templates_ExpiryValue DEFAULT 14,
-  ExpiryUnit        NVARCHAR(10)   NOT NULL CONSTRAINT DF_Templates_ExpiryUnit DEFAULT N'days',
-  ParticipantsJson  NVARCHAR(MAX)  NOT NULL CONSTRAINT CK_Templates_ParticipantsJson CHECK (ISJSON(ParticipantsJson) = 1),
   ContentHtml       NVARCHAR(MAX)  NOT NULL,
   PageSetupJson     NVARCHAR(400)  NOT NULL CONSTRAINT CK_Templates_PageSetupJson CHECK (ISJSON(PageSetupJson) = 1),
   CreatedBy         NVARCHAR(32)   NULL CONSTRAINT FK_Templates_Users REFERENCES eSign.Users (Id),

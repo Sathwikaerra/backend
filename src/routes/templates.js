@@ -1,52 +1,40 @@
 import { Router } from 'express'
 import { query, text, t } from '../db.js'
-import { badRequest, handle, newId, notFound, oneOf, parseJson, requireString } from '../utils.js'
+import { badRequest, handle, newId, notFound, parseJson, requireString } from '../utils.js'
 
 const router = Router()
-const EXPIRY_UNITS = ['hours', 'eod', 'days', 'weeks', 'months']
 const DEFAULT_PAGE_SETUP = { size: 'A4', orientation: 'portrait', margin: 'normal' }
 
 const SELECT = `
-  SELECT Id, Name, Description, SigningMethod, StampingMethod, ExpiryValue, ExpiryUnit,
-         ParticipantsJson, ContentHtml, PageSetupJson, CreatedAt, UpdatedAt
+  SELECT Id, Name, Description, ContentHtml, PageSetupJson, CreatedAt, UpdatedAt
   FROM ${t.Templates}`
+
+const normalizePageSetup = (page) => ({
+  size: typeof page?.size === 'string' ? page.size : DEFAULT_PAGE_SETUP.size,
+  orientation: typeof page?.orientation === 'string' ? page.orientation : DEFAULT_PAGE_SETUP.orientation,
+  margin: typeof page?.margin === 'string' ? page.margin : DEFAULT_PAGE_SETUP.margin,
+})
 
 const toTemplate = (row) => ({
   id: row.Id,
   name: row.Name,
   description: row.Description ?? '',
-  signingMethod: row.SigningMethod,
-  stampingMethod: row.StampingMethod ?? '',
-  expiryValue: row.ExpiryValue,
-  expiryUnit: row.ExpiryUnit,
-  participants: parseJson(row.ParticipantsJson, []),
   content: row.ContentHtml,
-  pageSetup: parseJson(row.PageSetupJson, DEFAULT_PAGE_SETUP),
+  pageSetup: normalizePageSetup(parseJson(row.PageSetupJson, DEFAULT_PAGE_SETUP)),
   createdAt: row.CreatedAt,
   updatedAt: row.UpdatedAt,
 })
 
 function readTemplate(body) {
-  const participants = Array.isArray(body.participants) ? body.participants : []
-  if (!participants.some((p) => p?.kind === 'signer')) throw badRequest('Add at least one signer')
-  if (participants.some((p) => p?.kind === 'signer' && !(Array.isArray(p.methods) && p.methods.length))) {
-    throw badRequest('Pick a signature method for every signer')
-  }
-  const expiryValue = Number(body.expiryValue)
-  if (!Number.isInteger(expiryValue) || expiryValue < 1 || expiryValue > 3650) throw badRequest('Expiry must be a whole number from 1 to 3650')
-  const content = typeof body.content === 'string' ? body.content : '<p></p>'
+  const data = body && typeof body === 'object' && !Array.isArray(body) ? body : {}
+  const content = typeof data.content === 'string' ? data.content : '<p></p>'
   if (content.length > 15_000_000) throw badRequest('The document is too large. Use smaller images.')
-  const page = body.pageSetup && typeof body.pageSetup === 'object' ? body.pageSetup : DEFAULT_PAGE_SETUP
+  const page = data.pageSetup && typeof data.pageSetup === 'object' && !Array.isArray(data.pageSetup) ? data.pageSetup : DEFAULT_PAGE_SETUP
   return {
-    name: requireString(body.name, 'Template name'),
-    description: typeof body.description === 'string' ? body.description.slice(0, 1000) : null,
-    signingMethod: oneOf(body.signingMethod, ['sequential', 'parallel'], 'Signing method', 'sequential'),
-    stampingMethod: typeof body.stampingMethod === 'string' && body.stampingMethod ? body.stampingMethod.slice(0, 40) : null,
-    expiryValue,
-    expiryUnit: oneOf(body.expiryUnit, EXPIRY_UNITS, 'Expiry unit', 'days'),
-    participants: text(JSON.stringify(participants)),
+    name: requireString(data.name, 'Template name'),
+    description: typeof data.description === 'string' ? data.description.slice(0, 1000) : null,
     content: text(content),
-    pageSetup: JSON.stringify({ size: page.size, orientation: page.orientation, margin: page.margin }),
+    pageSetup: JSON.stringify(normalizePageSetup(page)),
   }
 }
 
@@ -79,11 +67,9 @@ router.post(
     const id = newId()
     await query(
       `INSERT INTO ${t.Templates}
-         (Id, OrganisationId, Name, Description, SigningMethod, StampingMethod, ExpiryValue, ExpiryUnit,
-          ParticipantsJson, ContentHtml, PageSetupJson, CreatedBy)
+         (Id, OrganisationId, Name, Description, ContentHtml, PageSetupJson, CreatedBy)
        VALUES
-         (@id, @orgId, @name, @description, @signingMethod, @stampingMethod, @expiryValue, @expiryUnit,
-          @participants, @content, @pageSetup, @userId)`,
+         (@id, @orgId, @name, @description, @content, @pageSetup, @userId)`,
       { ...tpl, id, orgId: req.user.organisationId, userId: req.user.id },
     )
     res.status(201).json(await loadTemplate(id, req.user.organisationId))
@@ -97,9 +83,8 @@ router.put(
     const tpl = readTemplate(req.body)
     const rows = await query(
       `UPDATE ${t.Templates} SET
-         Name = @name, Description = @description, SigningMethod = @signingMethod, StampingMethod = @stampingMethod,
-         ExpiryValue = @expiryValue, ExpiryUnit = @expiryUnit, ParticipantsJson = @participants,
-         ContentHtml = @content, PageSetupJson = @pageSetup, UpdatedAt = SYSUTCDATETIME()
+         Name = @name, Description = @description, ContentHtml = @content,
+         PageSetupJson = @pageSetup, UpdatedAt = SYSUTCDATETIME()
        OUTPUT inserted.Id
        WHERE Id = @id AND OrganisationId = @orgId`,
       { ...tpl, id: req.params.id, orgId: req.user.organisationId },

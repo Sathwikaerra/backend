@@ -39,6 +39,7 @@ export async function sendTestEmail(to) {
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
 
 function otpEmail({ name, code, purpose }) {
+
   const action = purpose === 'signup' ? 'finish creating your account' : 'sign in'
   const subject = purpose === 'signup' ? `${code} is your verification code` : `${code} is your sign-in code`
   const text = `Hi ${name || 'there'},
@@ -108,6 +109,7 @@ function logFailure(kind, to, err, ms) {
 
 // Sends one message and logs the outcome either way. Rethrows on failure so the caller can respond.
 async function deliver(kind, to, message) {
+  console.log("deliverdeliverdeliverdeliverdeliver")
   const started = Date.now()
   try {
     const info = await transport.sendMail({ from: mail.from, to, ...message })
@@ -127,7 +129,9 @@ async function deliver(kind, to, message) {
 }
 
 export async function sendOtpEmail({ to, name, code, purpose }) {
+  console.log(`[mail] ${stamp()}  SENDING ${purpose} OTP email to ${to}`)
   const message = otpEmail({ name, code, purpose })
+  console.log("Message",message)
   if (!transport) {
     console.log(`\n[mail:dev] ${purpose.toUpperCase()} code for ${to}: ${code}  (expires in ${otp.expiryMinutes} min)`)
     console.log(`[mail:dev] ${stamp()}  NOT SENT  no SMTP configured; the code above was not emailed to ${to}\n`)
@@ -138,6 +142,7 @@ export async function sendOtpEmail({ to, name, code, purpose }) {
 
 // One-time code a signer enters before signing (Smart eSign)
 export async function sendSigningOtp({ to, name, code, contractName, minutes }) {
+  console.log(`[mail] ${stamp()}  SENDING signing code to ${to}`)
   const text = `Hi ${name || 'there'},
 
 Use this code to sign "${contractName}":

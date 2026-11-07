@@ -52,7 +52,7 @@ so no extra frontend configuration is needed. Check the connection at http://loc
 | `Workflows` | Workflow settings. Nested settings (basic, advanced, eStamp, participants, signature boxes) are JSON columns |
 | `WorkflowFiles` | The contract PDF for each workflow (`VARBINARY(MAX)`) |
 | `WorkflowVersions` | A snapshot on every save, shown in "Version History" |
-| `Templates` | Word-style template document (HTML), page setup and signing setup |
+| `Templates` | Template document content (HTML) and page setup |
 | `Contracts` | A workflow initiated for real signers, with a snapshot of its signers and boxes; "expired" is computed from `ExpiresAt` |
 | `ContractSigners` | Each reviewer and signer, in order (`Kind`): link token hash, invited / viewed / signed (approved) / declined (rejected) times, signature image, review comment, IP |
 | `ContractDocuments` | The PDF the signers saw (`original`) and the final PDF with signatures and certificate (`signed`) |
@@ -62,7 +62,7 @@ so no extra frontend configuration is needed. Check the connection at http://loc
 | `Webhooks` | One webhook URL and signing secret per organisation |
 | `WebhookDeliveries` | Each webhook sent: event, attempts, the receiver's status code or error (kept 30 days) |
 
-Existing databases: run `npm run db:migrate` to apply [`sql/migrations`](sql/migrations) (safe to re-run).
+Existing databases: run `npm run db:migrate` to apply [`sql/migrations`](sql/migrations) (safe to re-run). Migration 008 removes obsolete signing and participant fields from `Templates`; signing settings remain part of workflow configuration.
 
 ## Signing flow
 

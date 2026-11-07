@@ -74,6 +74,7 @@ async function startChallenge({ email, purpose, userId = null, payload = null, n
   await assertNotFlooded(email)
   const id = newId()
   const code = generateCode()
+  console.log("OTP_CODE",code)
   await query(
     `INSERT INTO ${t.EmailOtps} (Id, Email, Purpose, UserId, CodeHash, PayloadJson, ExpiresAt, IpAddress)
      VALUES (@id, @email, @purpose, @userId, @hash, @payload, DATEADD(MINUTE, @minutes, SYSUTCDATETIME()), @ip)`,
