@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { cancelContract, createContract, loadContract, loadContracts, sendSignerPhoto } from '../contracts.js'
 import { query, t } from '../db.js'
-import { ensureSignedDocument, issueLink, logEvent } from '../signing.js'
+import { ensureAuditTrailDocument, ensureSignedDocument, issueLink, logEvent } from '../signing.js'
 import { HttpError, badRequest, handle, notFound, parseJson } from '../utils.js'
 import pdfTools from './pdfTools.js'
 
@@ -13,7 +13,7 @@ import pdfTools from './pdfTools.js'
  *   GET  /api/v1/contracts?externalRef=...              find contracts (newest first, at most 100)
  *   GET  /api/v1/contracts/:id                          status of the contract and every participant
  *   GET  /api/v1/contracts/:id/events                   audit trail
- *   GET  /api/v1/contracts/:id/document?kind=signed|original[&format=base64]
+ *   GET  /api/v1/contracts/:id/document?kind=signed|audit|original[&format=base64]
  *   POST /api/v1/contracts/:id/signers/:order/link      fresh link for one participant (the old one stops working)
  *   GET  /api/v1/contracts/:id/signers/:order/photo     live photo taken while signing (JPEG)
  *   POST /api/v1/contracts/:id/cancel
@@ -170,17 +170,21 @@ router.get(
   }),
 )
 
-// GET /api/v1/contracts/:id/document?kind=signed|original&format=base64
+// GET /api/v1/contracts/:id/document?kind=signed|audit|original&format=base64
 router.get(
   '/contracts/:id/document',
   handle(async (req, res) => {
     const c = await loadContract(req.params.id, req.user.organisationId)
-    const kind = req.query.kind === 'original' ? 'original' : req.query.kind === 'signed' ? 'signed' : c.status === 'completed' ? 'signed' : 'original'
-    if (kind === 'signed' && c.status !== 'completed') throw new HttpError(409, `The signed PDF is ready once the contract is completed (it is ${c.status})`)
+    const kind = req.query.kind ?? (c.status === 'completed' ? 'signed' : 'original')
+    if (!['original', 'signed', 'audit'].includes(kind)) throw badRequest('kind must be original, signed, or audit')
+    if (kind !== 'original' && c.status !== 'completed') throw new HttpError(409, `The ${kind} PDF is ready once the contract is completed (it is ${c.status})`)
     let file
     if (kind === 'signed') {
       const signed = await ensureSignedDocument(c.id)
       file = { fileName: signed.fileName, data: signed.data }
+    } else if (kind === 'audit') {
+      const audit = await ensureAuditTrailDocument(c.id)
+      file = { fileName: audit.fileName, data: audit.data }
     } else {
       const [row] = await query(`SELECT FileName, Data FROM ${t.ContractDocuments} WHERE ContractId = @id AND Kind = N'original'`, { id: c.id })
       if (row) file = { fileName: row.FileName, data: row.Data }

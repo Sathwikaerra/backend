@@ -316,6 +316,14 @@ async function complete(me, req, { set, params, event, detail, verify }) {
          AND NOT EXISTS (SELECT 1 FROM ${t.ContractSigners} WHERE ContractId = @id AND Signed = 0)`,
       { id: me.ContractId },
     )
+    if (finished.length) {
+      await logEvent(run, {
+        contractId: me.ContractId,
+        event: 'completed',
+        detail: 'All required participants completed signing',
+        req,
+      })
+    }
     return finished.length > 0
   })
 

@@ -6,10 +6,10 @@
 
   - Contracts keep a snapshot of the workflow they were started from (signing order,
     signer roles, signature boxes) so editing the workflow later never changes a sent contract.
-  - ContractDocuments holds the PDF the signers saw ('original') and the final signed PDF ('signed').
+  - ContractDocuments holds the original, final signed PDF, and standalone audit PDF.
   - ContractSigners gets the private signing-link token (only its SHA-256 hash is stored),
     the adopted signature image and the evidence captured when signing.
-  - ContractEvents is the audit trail printed on the certificate page of the signed PDF.
+  - ContractEvents is the audit trail printed in the standalone certificate PDF.
 */
 
 /* ---------- Contracts: snapshot columns + 'declined' status ---------- */
@@ -75,7 +75,7 @@ GO
 IF OBJECT_ID(N'eSign.ContractDocuments', N'U') IS NULL
 CREATE TABLE eSign.ContractDocuments (
   ContractId   NVARCHAR(32)   NOT NULL CONSTRAINT FK_ContractDocuments_Contracts REFERENCES eSign.Contracts (Id) ON DELETE CASCADE,
-  Kind         NVARCHAR(10)   NOT NULL CONSTRAINT CK_ContractDocuments_Kind CHECK (Kind IN (N'original', N'signed')),
+  Kind         NVARCHAR(10)   NOT NULL CONSTRAINT CK_ContractDocuments_Kind CHECK (Kind IN (N'original', N'signed', N'audit')),
   FileName     NVARCHAR(260)  NOT NULL,
   SizeBytes    INT            NOT NULL,
   Sha256       NVARCHAR(64)   NOT NULL,

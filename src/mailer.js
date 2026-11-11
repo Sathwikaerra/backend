@@ -98,11 +98,9 @@ function hintFor(err) {
   return null
 }
 
-function logFailure(kind, to, err, ms) {
-  console.error(`[mail] ${stamp()}  FAILED  ${kind} email to ${to} via ${mail.host}:${mail.port} after ${ms} ms`)
-  console.error(`[mail]   error:    ${err.message}`)
+function logFailure(kind, err, ms) {
+  console.error(`[mail] ${stamp()}  FAILED  ${kind} email via ${mail.host}:${mail.port} after ${ms} ms`)
   if (err.code || err.responseCode) console.error(`[mail]   code:     ${[err.code, err.responseCode].filter(Boolean).join(' / ')}`)
-  if (err.response) console.error(`[mail]   server:   ${String(err.response).trim()}`)
   const hint = hintFor(err)
   if (hint) console.error(`[mail]   hint:     ${hint}`)
 }
@@ -115,15 +113,15 @@ async function deliver(kind, to, message) {
     const info = await transport.sendMail({ from: mail.from, to, ...message })
     const ms = Date.now() - started
     if (info.rejected?.length) {
-      const err = new Error(`Recipient rejected: ${info.rejected.join(', ')}`)
+      const err = new Error('Recipient rejected by the mail server')
       err.response = info.response
-      logFailure(kind, to, err, ms)
+      logFailure(kind, err, ms)
       throw err
     }
-    console.log(`[mail] ${stamp()}  SENT    ${kind} email to ${to} via ${mail.host} in ${ms} ms (id ${info.messageId})`)
+    console.log(`[mail] ${stamp()}  SENT    ${kind} email via ${mail.host} in ${ms} ms (id ${info.messageId})`)
     return info
   } catch (err) {
-    if (!err.message.startsWith('Recipient rejected')) logFailure(kind, to, err, Date.now() - started)
+    if (err.message !== 'Recipient rejected by the mail server') logFailure(kind, err, Date.now() - started)
     throw err
   }
 }
@@ -168,9 +166,9 @@ The code expires in ${minutes} minutes. Never share it with anyone.`
 // Resolves true when the email was handed to the mail server, false when it was only printed.
 async function send(kind, to, message, devLines) {
   if (!transport) {
-    console.log(`\n[mail:dev] ${kind.toUpperCase()} for ${to}`)
+    console.log(`\n[mail:dev] ${kind.toUpperCase()}`)
     for (const line of devLines) console.log(`[mail:dev]   ${line}`)
-    console.log(`[mail:dev] ${stamp()}  NOT SENT  no SMTP configured; this email was not delivered to ${to}\n`)
+    console.log(`[mail:dev] ${stamp()}  NOT SENT  no SMTP configured; this email was not delivered\n`)
     return false
   }
   await deliver(kind, to, message)
@@ -208,22 +206,41 @@ This link is personal to you; please don't forward it. Please ${verb} before ${f
   ])
 }
 
-// Everyone signed: the signed PDF goes out as an attachment
+// Everyone signed: this message carries only the signed document PDF.
 export async function sendSigningCompleted({ to, name, contractName, fileName, pdf, link }) {
   const text = `Hi ${name || 'there'},
 
-"${contractName}" has been signed by all parties. The signed copy is attached.${link ? `\n\nYou can also download it here: ${link}` : ''}`
+"${contractName}" signing is complete. The signed document is attached.${link ? `\n\nYou can also download it here: ${link}` : ''}`
   const html = layout({
     body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name || 'there')},</p>
-          <p style="margin:0 0 12px"><b>${escapeHtml(contractName)}</b> has been signed by all parties.</p>
-          <p style="margin:0;color:#6d6887;font-size:13px">The signed PDF, with its certificate of completion, is attached to this email.</p>`,
+          <p style="margin:0 0 12px">Signing of <b>${escapeHtml(contractName)}</b> is complete.</p>
+          <p style="margin:0;color:#6d6887;font-size:13px">The final signed document PDF is attached.</p>`,
     button: link ? { label: 'View signed document', href: link } : null,
   })
   const attachments = [{ filename: fileName, content: pdf, contentType: 'application/pdf' }]
-  await send('signed copy', to, { subject: `Completed: ${contractName}`, text, html, attachments }, [
+  return send('signed document', to, { subject: `Signing completed: ${contractName}`, text, html, attachments }, [
     `document: ${contractName} (signed PDF attached, ${Math.round(pdf.length / 1024)} KB)`,
     ...(link ? [`link: ${link}`] : []),
   ])
+}
+
+// Sends only the standalone Audit Trail / Certificate of Completion PDF.
+export async function sendAuditTrailEmail({ to, name, contractName, fileName, pdf }) {
+  const text = `Hi ${name || 'there'},
+
+Signing of "${contractName}" is complete. The attached file is the Audit Trail / Certificate of Completion for this document.`
+  const html = layout({
+    body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name || 'there')},</p>
+          <p style="margin:0 0 12px">The Audit Trail / Certificate of Completion for <b>${escapeHtml(contractName)}</b> is attached.</p>
+          <p style="margin:0;color:#6d6887;font-size:13px">This is a separate PDF containing the completion certificate and available signing and audit information.</p>`,
+  })
+  const attachments = [{ filename: fileName, content: pdf, contentType: 'application/pdf' }]
+  return send('audit trail', to, {
+    subject: `Audit Trail / Certificate of Completion: ${contractName}`,
+    text,
+    html,
+    attachments,
+  }, [`document: ${contractName} (Audit Trail / Certificate of Completion PDF attached, ${Math.round(pdf.length / 1024)} KB)`])
 }
 
 // Tells the sender that a signer declined, or a reviewer rejected the document

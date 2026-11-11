@@ -1,8 +1,8 @@
 import crypto from 'node:crypto'
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib'
 import { config } from './config.js'
-import { binary, query, t } from './db.js'
-import { sendSigningCompleted, sendSigningInvite } from './mailer.js'
+import { binary, query, t, transaction } from './db.js'
+import { sendAuditTrailEmail, sendSigningCompleted, sendSigningInvite } from './mailer.js'
 import { emitContractEvent } from './webhooks.js'
 
 /*
@@ -204,16 +204,15 @@ async function loadForPdf(contractId) {
   return { c, signers, events, original }
 }
 
-// Draws each signature into its boxes, footers every page and appends a certificate of completion
+// Draws each signature into its boxes and adds the existing footer to every document page.
 export async function buildSignedPdf(contractId) {
-  const { c, signers, events, original } = await loadForPdf(contractId)
+  const { c, signers, original } = await loadForPdf(contractId)
   if (!c || !original) throw new Error('The contract document is missing')
 
   const pdf = await PDFDocument.load(original.Data, { ignoreEncryption: true })
   const font = await pdf.embedFont(StandardFonts.Helvetica)
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold)
   const grey = rgb(0.42, 0.4, 0.5)
-  const ink = rgb(0.1, 0.09, 0.19)
   const brand = rgb(0.31, 0.27, 0.9)
 
   const boxes = JSON.parse(c.BoxesJson || '[]')
@@ -265,7 +264,26 @@ export async function buildSignedPdf(contractId) {
     })
   }
 
-  // Certificate of completion
+  return Buffer.from(await pdf.save())
+}
+
+// Renders the existing completion certificate and audit history into its own PDF.
+export async function buildAuditTrailPdf(contractId) {
+  const { c, signers, events, original } = await loadForPdf(contractId)
+  if (!c || !original) throw new Error('The contract document is missing')
+
+  const pdf = await PDFDocument.create()
+  const font = await pdf.embedFont(StandardFonts.Helvetica)
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold)
+  const grey = rgb(0.42, 0.4, 0.5)
+  const ink = rgb(0.1, 0.09, 0.19)
+  const brand = rgb(0.31, 0.27, 0.9)
+  const images = new Map()
+  for (const s of signers) {
+    const bytes = dataUrlToBytes(s.SignatureImage)
+    if (bytes) images.set(s.SignerOrder, await pdf.embedPng(bytes))
+  }
+
   const W = 595
   const H = 842
   let page = pdf.addPage([W, H])
@@ -342,7 +360,6 @@ export async function buildSignedPdf(contractId) {
     }
     line(`Device: ${(s.SignedUserAgent ?? '-').slice(0, 110)}`, { size: 7.5, color: grey, gap: 10 })
     if (s.PhotoImage) {
-      // Live photo taken while signing
       const photo = await pdf.embedJpg(Buffer.from(s.PhotoImage.split(',')[1] ?? '', 'base64')).catch(() => null)
       if (photo) {
         const ph = 84
@@ -371,34 +388,224 @@ export async function buildSignedPdf(contractId) {
   return Buffer.from(await pdf.save())
 }
 
-const signedFileName = (name) => `${String(name).replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 150) || 'contract'} - signed.pdf`
-
-// Returns the stored signed PDF, building and saving it first if needed
-export async function ensureSignedDocument(contractId) {
-  const [existing] = await query(`SELECT FileName, Data FROM ${t.ContractDocuments} WHERE ContractId = @contractId AND Kind = N'signed'`, { contractId })
-  if (existing) return { fileName: existing.FileName, data: existing.Data }
-  const [c] = await query(`SELECT Name FROM ${t.Contracts} WHERE Id = @contractId`, { contractId })
-  const data = await buildSignedPdf(contractId)
-  const fileName = signedFileName(c.Name)
-  await query(
-    `IF NOT EXISTS (SELECT 1 FROM ${t.ContractDocuments} WHERE ContractId = @contractId AND Kind = N'signed')
-       INSERT INTO ${t.ContractDocuments} (ContractId, Kind, FileName, SizeBytes, Sha256, Data)
-       VALUES (@contractId, N'signed', @fileName, @size, @hash, @data)`,
-    { contractId, fileName, size: data.length, hash: sha256(data), data: binary(data) },
-  )
-  return { fileName, data }
+const cleanFileName = (name) => String(name).replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 150) || 'contract'
+const signedFileName = (name) => `${cleanFileName(name)} - signed.pdf`
+const auditFileName = (name) => `${cleanFileName(name)} - audit trail.pdf`
+const PDF_STATUS_FIELDS = {
+  signed: { status: 'SignedPdfStatus', startedAt: 'SignedPdfStartedAt', generatedAt: 'SignedPdfGeneratedAt', error: 'SignedPdfError' },
+  audit: { status: 'AuditPdfStatus', startedAt: 'AuditPdfStartedAt', generatedAt: 'AuditPdfGeneratedAt', error: 'AuditPdfError' },
 }
 
-// Runs once when the last signer signs: builds the signed PDF and emails it to every signer and the sender
-export async function finalizeContract(contractId, req) {
-  const { fileName, data } = await ensureSignedDocument(contractId)
-  await logEvent(query, { contractId, event: 'completed', detail: `Signed PDF created (SHA-256 ${sha256(data).slice(0, 16)}...)`, req })
-  const c = await contractForMail(contractId)
-  const signers = await query(`SELECT Name, Email FROM ${t.ContractSigners} WHERE ContractId = @contractId ORDER BY SignerOrder`, { contractId })
-  // When the API caller delivers the links, they deliver the signed copy too; the sender still gets it
-  const recipients = c.Notify === 'none' ? [] : signers.map((s) => ({ name: s.Name, email: s.Email }))
-  if (c.SenderEmail && !recipients.some((r) => r.email === c.SenderEmail)) recipients.push({ name: c.SenderName, email: c.SenderEmail })
-  for (const r of recipients) {
-    await sendSigningCompleted({ to: r.email, name: r.name, contractName: c.Name, fileName, pdf: data }).catch(() => {})
+async function setPdfStatus(contractId, kind, status, error = null, generated = false) {
+  const fields = PDF_STATUS_FIELDS[kind]
+  await query(
+    `UPDATE ${t.Contracts}
+     SET ${fields.status} = @status,
+         ${fields.startedAt} = CASE WHEN @status = N'generating' THEN SYSUTCDATETIME() ELSE NULL END,
+         ${fields.generatedAt} = CASE WHEN @status = N'ready' AND (@generated = 1 OR ${fields.generatedAt} IS NULL) THEN SYSUTCDATETIME() ELSE ${fields.generatedAt} END,
+         ${fields.error} = @error
+     WHERE Id = @contractId`,
+    { contractId, status, error: error ? String(error).slice(0, 1000) : null, generated },
+  )
+}
+
+async function ensurePdfDocument(contractId, kind) {
+  const [existing] = await query(
+    `SELECT FileName, Data, SizeBytes, Sha256 FROM ${t.ContractDocuments} WHERE ContractId = @contractId AND Kind = @kind`,
+    { contractId, kind },
+  )
+  if (existing) {
+    const data = Buffer.from(existing.Data)
+    if (!data.length || existing.SizeBytes !== data.length || existing.Sha256 !== sha256(data)) {
+      const error = `Stored ${kind} PDF failed its integrity check`
+      await setPdfStatus(contractId, kind, 'failed', error)
+      if (kind === 'signed') throw new Error(error)
+    } else {
+      await setPdfStatus(contractId, kind, 'ready')
+      return { fileName: existing.FileName, data }
+    }
   }
+
+  const fields = PDF_STATUS_FIELDS[kind]
+  const claimGeneration = async () => {
+    const claimed = await query(
+      `UPDATE ${t.Contracts}
+       SET ${fields.status} = N'generating', ${fields.startedAt} = SYSUTCDATETIME(), ${fields.error} = NULL
+       OUTPUT inserted.Id
+       WHERE Id = @contractId AND (
+         ${fields.status} IN (N'pending', N'failed', N'ready')
+         OR (${fields.status} = N'generating' AND (${fields.startedAt} IS NULL OR ${fields.startedAt} < DATEADD(minute, -15, SYSUTCDATETIME())))
+       )`,
+      { contractId },
+    )
+    return claimed.length > 0
+  }
+  let claimed = await claimGeneration()
+  for (let attempt = 0; !claimed && attempt < 60; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const [saved] = await query(
+      `SELECT FileName, Data, SizeBytes, Sha256 FROM ${t.ContractDocuments} WHERE ContractId = @contractId AND Kind = @kind`,
+      { contractId, kind },
+    )
+    if (saved) {
+      const data = Buffer.from(saved.Data)
+      if (data.length && saved.SizeBytes === data.length && saved.Sha256 === sha256(data)) {
+        await setPdfStatus(contractId, kind, 'ready')
+        return { fileName: saved.FileName, data }
+      }
+    }
+    claimed = await claimGeneration()
+  }
+  if (!claimed) throw new Error(`${kind} PDF generation is already in progress`)
+
+  try {
+    const [c] = await query(`SELECT Name FROM ${t.Contracts} WHERE Id = @contractId`, { contractId })
+    if (!c) throw new Error('Contract not found')
+    const data = kind === 'signed' ? await buildSignedPdf(contractId) : await buildAuditTrailPdf(contractId)
+    const fileName = kind === 'signed' ? signedFileName(c.Name) : auditFileName(c.Name)
+    if (kind === 'audit') {
+      await query(
+        `MERGE ${t.ContractDocuments} WITH (HOLDLOCK) AS target
+         USING (SELECT @contractId AS ContractId, @kind AS Kind) AS source
+         ON target.ContractId = source.ContractId AND target.Kind = source.Kind
+         WHEN MATCHED THEN UPDATE SET FileName = @fileName, SizeBytes = @size, Sha256 = @hash, Data = @data, CreatedAt = SYSUTCDATETIME()
+         WHEN NOT MATCHED THEN INSERT (ContractId, Kind, FileName, SizeBytes, Sha256, Data)
+           VALUES (@contractId, @kind, @fileName, @size, @hash, @data);`,
+        { contractId, kind, fileName, size: data.length, hash: sha256(data), data: binary(data) },
+      )
+    } else {
+      await query(
+        `IF NOT EXISTS (SELECT 1 FROM ${t.ContractDocuments} WHERE ContractId = @contractId AND Kind = @kind)
+           INSERT INTO ${t.ContractDocuments} (ContractId, Kind, FileName, SizeBytes, Sha256, Data)
+           VALUES (@contractId, @kind, @fileName, @size, @hash, @data)`,
+        { contractId, kind, fileName, size: data.length, hash: sha256(data), data: binary(data) },
+      )
+    }
+    const [saved] = await query(
+      `SELECT FileName, Data FROM ${t.ContractDocuments} WHERE ContractId = @contractId AND Kind = @kind`,
+      { contractId, kind },
+    )
+    if (!saved) throw new Error(`Could not save ${kind} PDF`)
+    await setPdfStatus(contractId, kind, 'ready', null, true)
+    return { fileName: saved.FileName, data: Buffer.from(saved.Data) }
+  } catch (err) {
+    await setPdfStatus(contractId, kind, 'failed', err.message)
+    throw err
+  }
+}
+
+// Returns the stored signed PDF, building and saving it first if needed.
+export async function ensureSignedDocument(contractId) {
+  return ensurePdfDocument(contractId, 'signed')
+}
+
+export async function ensureAuditTrailDocument(contractId) {
+  return ensurePdfDocument(contractId, 'audit')
+}
+
+async function recordCompletionEvent(contractId, req) {
+  await transaction(async (run) => {
+    await run(`SELECT Id FROM ${t.Contracts} WITH (UPDLOCK, HOLDLOCK) WHERE Id = @contractId`, { contractId })
+    const [existing] = await run(
+      `SELECT TOP 1 Id FROM ${t.ContractEvents} WHERE ContractId = @contractId AND Event = N'completed'`,
+      { contractId },
+    )
+    if (!existing) await logEvent(run, { contractId, event: 'completed', detail: 'All required participants completed signing', req })
+  })
+}
+
+async function deliverCompletionEmail(contractId, signer, kind, document, contractName) {
+  const claimed = await query(
+    `UPDATE ${t.ContractEmailDeliveries}
+     SET Status = N'sending', AttemptCount = AttemptCount + 1, LastAttemptAt = SYSUTCDATETIME(), LastError = NULL
+     OUTPUT inserted.Status
+     WHERE ContractId = @contractId AND SignerOrder = @order AND Kind = @kind
+       AND (Status IN (N'pending', N'failed')
+         OR (Status = N'sending' AND LastAttemptAt < DATEADD(minute, -15, SYSUTCDATETIME())))`,
+    { contractId, order: signer.SignerOrder, kind },
+  )
+  if (!claimed.length) return
+
+  try {
+    const sent = kind === 'signed'
+      ? await sendSigningCompleted({ to: signer.Email, name: signer.Name, contractName, fileName: document.fileName, pdf: document.data })
+      : await sendAuditTrailEmail({ to: signer.Email, name: signer.Name, contractName, fileName: document.fileName, pdf: document.data })
+    if (!sent) throw new Error('SMTP is not configured; email was not delivered')
+    await query(
+      `UPDATE ${t.ContractEmailDeliveries}
+       SET Status = N'sent', SentAt = SYSUTCDATETIME(), LastError = NULL
+       WHERE ContractId = @contractId AND SignerOrder = @order AND Kind = @kind AND Status = N'sending'`,
+      { contractId, order: signer.SignerOrder, kind },
+    )
+  } catch (err) {
+    const error = [err.code, err.responseCode].filter(Boolean).join(' / ')
+    const summary = error ? `Mail delivery failed (${error})` : 'Mail delivery failed'
+    await query(
+      `UPDATE ${t.ContractEmailDeliveries}
+       SET Status = N'failed', LastError = @error
+       WHERE ContractId = @contractId AND SignerOrder = @order AND Kind = @kind AND Status = N'sending'`,
+      { contractId, order: signer.SignerOrder, kind, error: summary },
+    )
+    console.error(`[signing] ${kind} completion email failed for contract ${contractId}: ${summary}`)
+  }
+}
+
+// Completes document generation and both independent email deliveries; failed emails can be retried.
+export async function finalizeContract(contractId, req) {
+  const [contract] = await query(
+    `SELECT Id, Name, Status FROM ${t.Contracts} WHERE Id = @contractId`,
+    { contractId },
+  )
+  if (!contract || contract.Status !== 'completed') throw new Error('Contract is not eligible for finalization')
+  const [eligibility] = await query(
+    `SELECT
+       SUM(CASE WHEN Signed = 0 THEN 1 ELSE 0 END) AS PendingCount,
+       SUM(CASE WHEN Kind = N'signer' THEN 1 ELSE 0 END) AS SignerCount
+     FROM ${t.ContractSigners} WHERE ContractId = @contractId`,
+    { contractId },
+  )
+  if (!eligibility.SignerCount || eligibility.PendingCount) throw new Error('Contract has participants who have not completed signing')
+
+  await recordCompletionEvent(contractId, req)
+  let signed = null
+  let audit = null
+  try {
+    signed = await ensureSignedDocument(contractId)
+  } catch (err) {
+    console.error(`[signing] signed PDF generation failed for contract ${contractId}: ${err.message}`)
+  }
+  try {
+    audit = await ensureAuditTrailDocument(contractId)
+  } catch (err) {
+    console.error(`[signing] audit PDF generation failed for contract ${contractId}: ${err.message}`)
+  }
+
+  const signers = await query(
+    `SELECT SignerOrder, Name, Email FROM ${t.ContractSigners}
+     WHERE ContractId = @contractId AND Kind = N'signer' ORDER BY SignerOrder`,
+    { contractId },
+  )
+  for (const kind of ['signed', 'audit']) {
+    await query(
+      `MERGE ${t.ContractEmailDeliveries} WITH (HOLDLOCK) AS target
+       USING (
+         SELECT s.ContractId, s.SignerOrder
+         FROM ${t.ContractSigners} s
+         WHERE s.ContractId = @contractId AND s.Kind = N'signer'
+       ) AS source
+       ON target.ContractId = source.ContractId AND target.SignerOrder = source.SignerOrder AND target.Kind = @kind
+       WHEN NOT MATCHED THEN
+         INSERT (ContractId, SignerOrder, Kind, Status)
+         VALUES (source.ContractId, source.SignerOrder, @kind, N'pending');`,
+      { contractId, kind },
+    )
+    const document = kind === 'signed' ? signed : audit
+    if (!document) continue
+    for (const signer of signers) await deliverCompletionEmail(contractId, signer, kind, document, contract.Name)
+  }
+  return query(
+    `SELECT SignerOrder AS signerOrder, Kind AS kind, Status AS status, AttemptCount AS attempts, SentAt AS sentAt, LastError AS error
+     FROM ${t.ContractEmailDeliveries} WHERE ContractId = @contractId ORDER BY SignerOrder, Kind`,
+    { contractId },
+  )
 }

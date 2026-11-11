@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { cancelContract, createContract, loadContract, loadContracts, sendSignerPhoto } from '../contracts.js'
 import { query, t } from '../db.js'
-import { ensureSignedDocument, inviteSigner } from '../signing.js'
+import { ensureAuditTrailDocument, ensureSignedDocument, finalizeContract, inviteSigner } from '../signing.js'
 import { HttpError, badRequest, handle, notFound } from '../utils.js'
 
 const router = Router()
@@ -57,16 +57,23 @@ router.get(
   }),
 )
 
-// GET /api/contracts/:id/document?kind=signed|original   (signed is only available once completed)
+// GET /api/contracts/:id/document?kind=signed|audit|original
 router.get(
   '/:id/document',
   handle(async (req, res) => {
     const contract = await loadContract(req.params.id, req.user.organisationId)
-    const kind = req.query.kind === 'original' || contract.status !== 'completed' ? 'original' : 'signed'
+    const kind = req.query.kind ?? (contract.status === 'completed' ? 'signed' : 'original')
+    if (!['original', 'signed', 'audit'].includes(kind)) throw badRequest('kind must be original, signed, or audit')
+    if (kind !== 'original' && contract.status !== 'completed') {
+      throw new HttpError(409, `The ${kind} PDF is available once the contract is completed`)
+    }
     let file
     if (kind === 'signed') {
       const signed = await ensureSignedDocument(contract.id)
       file = { FileName: signed.fileName, Data: signed.data }
+    } else if (kind === 'audit') {
+      const audit = await ensureAuditTrailDocument(contract.id)
+      file = { FileName: audit.fileName, Data: audit.data }
     } else {
       ;[file] = await query(`SELECT FileName, Data FROM ${t.ContractDocuments} WHERE ContractId = @id AND Kind = N'original'`, { id: contract.id })
     }
@@ -74,6 +81,16 @@ router.get(
     res.set('Content-Type', 'application/pdf')
     res.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(file.FileName)}`)
     res.send(file.Data)
+  }),
+)
+
+// POST /api/contracts/:id/finalize/retry  -> retries only failed completion deliveries
+router.post(
+  '/:id/finalize/retry',
+  handle(async (req, res) => {
+    const contract = await loadContract(req.params.id, req.user.organisationId)
+    if (contract.status !== 'completed') throw new HttpError(409, 'Only completed contracts can be finalized')
+    res.json({ deliveries: await finalizeContract(contract.id, req) })
   }),
 )
 
