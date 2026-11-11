@@ -19,6 +19,10 @@ export const config = {
   frontendDist: (process.env.FRONTEND_DIST || '').trim(),
   // Public address of the frontend, used in signing links. Empty: the browser's origin when it is a CORS origin.
   appUrl: (process.env.APP_URL || '').replace(/\/$/, ''),
+  auditTrail: {
+    logoUrl: process.env.AUDIT_TRAIL_LOGO_URL || 'http://172.18.2.34:3404/assets/jayam-logo-new-OSmOLy-P.png',
+    subtitle: process.env.AUDIT_TRAIL_SUBTITLE || 'Jayam Solutions Ltd',
+  },
   corsOrigins: (process.env.CORS_ORIGIN || 'http://localhost:5173')
     .split(',')
     .map((s) => s.trim())

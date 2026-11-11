@@ -179,9 +179,9 @@ function dataUrlToBytes(dataUrl) {
   return m ? Buffer.from(m[1], 'base64') : null
 }
 
-async function loadForPdf(contractId) {
+async function loadForPdf(contractId, includeSignedHash = false) {
   const [c] = await query(
-    `SELECT c.Id, c.Name, c.WorkflowName, c.SigningMethod, c.CreatedAt, c.CompletedAt, c.BoxesJson, c.ParticipantsJson,
+    `SELECT c.Id, c.Name, c.WorkflowName, c.SigningMethod, c.Status, c.Estamping, c.CreatedAt, c.CompletedAt, c.BoxesJson, c.ParticipantsJson,
             o.Name AS OrgName, u.Name AS SenderName, u.Email AS SenderEmail
      FROM ${t.Contracts} c
      JOIN ${t.Organisations} o ON o.Id = c.OrganisationId
@@ -190,7 +190,7 @@ async function loadForPdf(contractId) {
     { contractId },
   )
   const signers = await query(
-    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedMethod, Verification, LocationJson, LocationAddress, PhotoImage, SignedAt, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
+    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedMethod, Verification, LocationJson, LocationAddress, PhotoImage, Signed, SignedAt, DeclinedAt, DeclineReason, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
      FROM ${t.ContractSigners} WHERE ContractId = @contractId ORDER BY SignerOrder`,
     { contractId },
   )
@@ -201,7 +201,10 @@ async function loadForPdf(contractId) {
   const [original] = await query(`SELECT FileName, Sha256, Data FROM ${t.ContractDocuments} WHERE ContractId = @contractId AND Kind = N'original'`, {
     contractId,
   })
-  return { c, signers, events, original }
+  const [signed] = includeSignedHash
+    ? await query(`SELECT Sha256 FROM ${t.ContractDocuments} WHERE ContractId = @contractId AND Kind = N'signed'`, { contractId })
+    : []
+  return { c, signers, events, original, signed }
 }
 
 // Draws each signature into its boxes and adds the existing footer to every document page.
@@ -268,123 +271,316 @@ export async function buildSignedPdf(contractId) {
 }
 
 // Renders the existing completion certificate and audit history into its own PDF.
+const fullTimestamp = (date) => (date ? `${new Date(date).toISOString().slice(0, 19).replace('T', ' ')} UTC` : null)
+
+function auditWrap(value, font, size, width) {
+  const lines = []
+  let line = ''
+  for (const word of safe(value).split(/\s+/).filter(Boolean)) {
+    let remaining = word
+    while (font.widthOfTextAtSize(remaining, size) > width) {
+      let end = 1
+      while (end < remaining.length && font.widthOfTextAtSize(remaining.slice(0, end + 1), size) <= width) end += 1
+      const piece = remaining.slice(0, end)
+      if (line) {
+        lines.push(line)
+        line = ''
+      }
+      lines.push(piece)
+      remaining = remaining.slice(end)
+    }
+    if (line && font.widthOfTextAtSize(`${line} ${remaining}`, size) > width) {
+      lines.push(line)
+      line = remaining
+    } else {
+      line = line ? `${line} ${remaining}` : remaining
+    }
+  }
+  if (line) lines.push(line)
+  return lines.length ? lines : ['']
+}
+
+async function loadAuditLogo(pdf) {
+  if (!config.auditTrail.logoUrl) return null
+  try {
+    const response = await fetch(config.auditTrail.logoUrl, { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) throw new Error(`Logo server returned HTTP ${response.status}`)
+    const contentType = response.headers.get('content-type')?.toLowerCase() || ''
+    const size = Number(response.headers.get('content-length')) || 0
+    if (size > 2 * 1024 * 1024) throw new Error('Logo exceeds the 2 MB limit')
+    const reader = response.body.getReader()
+    const chunks = []
+    let total = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.length
+      if (total > 2 * 1024 * 1024) {
+        await reader.cancel()
+        throw new Error('Logo exceeds the 2 MB limit')
+      }
+      chunks.push(Buffer.from(value))
+    }
+    const bytes = Buffer.concat(chunks, total)
+    if (contentType.includes('image/png') || bytes.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))) return await pdf.embedPng(bytes)
+    if (contentType.includes('image/jpeg') || contentType.includes('image/jpg') || (bytes[0] === 0xff && bytes[1] === 0xd8)) return await pdf.embedJpg(bytes)
+    throw new Error('Logo must be a PNG or JPEG image')
+  } catch (err) {
+    console.warn(`[signing] audit trail logo could not be loaded: ${err.message}`)
+    return null
+  }
+}
+
+function auditBrowser(userAgent) {
+  if (!userAgent) return null
+  const browserVersion = [/Edg\/([\d.]+)/, /OPR\/([\d.]+)/, /Firefox\/([\d.]+)/, /Chrome\/([\d.]+)/, /Version\/([\d.]+).*Safari/]
+    .map((pattern) => pattern.exec(userAgent)?.[1])
+  const browser = browserVersion[0] ? `Edge ${browserVersion[0]}` : browserVersion[1] ? `Opera ${browserVersion[1]}` :
+    browserVersion[2] ? `Firefox ${browserVersion[2]}` : browserVersion[3] ? `Chrome ${browserVersion[3]}` :
+      browserVersion[4] ? `Safari ${browserVersion[4]}` : null
+  const os = /Windows NT/.test(userAgent) ? 'Windows' : /Android/.test(userAgent) ? 'Android' :
+    /iPhone|iPad|iPod/.test(userAgent) ? 'iOS' : /Mac OS X/.test(userAgent) ? 'macOS' : /Linux/.test(userAgent) ? 'Linux' : null
+  return [browser, os].filter(Boolean).join(' / ') || null
+}
+
+// Branded, paginated rendering of the stored completion and audit evidence.
 export async function buildAuditTrailPdf(contractId) {
-  const { c, signers, events, original } = await loadForPdf(contractId)
+  const { c, signers, events, original, signed } = await loadForPdf(contractId, true)
   if (!c || !original) throw new Error('The contract document is missing')
 
   const pdf = await PDFDocument.create()
   const font = await pdf.embedFont(StandardFonts.Helvetica)
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold)
-  const grey = rgb(0.42, 0.4, 0.5)
-  const ink = rgb(0.1, 0.09, 0.19)
-  const brand = rgb(0.31, 0.27, 0.9)
+  const logo = await loadAuditLogo(pdf)
+  const ink = rgb(0.12, 0.15, 0.2)
+  const muted = rgb(0.38, 0.42, 0.49)
+  const brand = rgb(0.16, 0.31, 0.53)
+  const pale = rgb(0.95, 0.97, 0.99)
+  const border = rgb(0.84, 0.87, 0.91)
   const images = new Map()
-  for (const s of signers) {
-    const bytes = dataUrlToBytes(s.SignatureImage)
-    if (bytes) images.set(s.SignerOrder, await pdf.embedPng(bytes))
+  for (const signer of signers) {
+    const bytes = dataUrlToBytes(signer.SignatureImage)
+    if (!bytes) continue
+    try {
+      images.set(signer.SignerOrder, await pdf.embedPng(bytes))
+    } catch {
+      console.warn(`[signing] signature image could not be embedded for contract ${contractId}, signer order ${signer.SignerOrder}`)
+    }
   }
-
   const W = 595
   const H = 842
-  let page = pdf.addPage([W, H])
-  let y = H - 56
-  const line = (text, { size = 9.5, f = font, color = ink, x = 48, gap = 4 } = {}) => {
-    if (y < 60) {
-      page = pdf.addPage([W, H])
-      y = H - 56
+  const left = 44
+  const right = W - 44
+  const bottom = 58
+  const pages = []
+  let page
+  let y
+
+  const newPage = () => {
+    page = pdf.addPage([W, H])
+    pages.push(page)
+    if (logo) {
+      const scale = Math.min(128 / logo.width, 36 / logo.height)
+      const width = logo.width * scale
+      const height = logo.height * scale
+      page.drawImage(logo, { x: left, y: 812 - height, width, height })
+      if (config.auditTrail.subtitle) page.drawText(safe(config.auditTrail.subtitle), { x: left, y: 797 - height, size: 8, font, color: muted })
+    } else if (config.auditTrail.subtitle) {
+      page.drawText(safe(config.auditTrail.subtitle), { x: left, y: 792, size: 9, font: bold, color: brand })
     }
-    page.drawText(safe(text), { x, y, size, font: f, color, maxWidth: W - x - 48 })
-    y -= size + gap
+    page.drawText('AUDIT TRAIL', { x: 360, y: 794, size: 16, font: bold, color: brand })
+    page.drawLine({ start: { x: left, y: 740 }, end: { x: right, y: 740 }, thickness: 0.8, color: border })
+    y = 720
   }
-  const rule = () => {
-    page.drawLine({ start: { x: 48, y: y + 4 }, end: { x: W - 48, y: y + 4 }, thickness: 0.6, color: rgb(0.88, 0.87, 0.93) })
+  const space = (height) => {
+    if (y - height < bottom) newPage()
+  }
+  const section = (title) => {
+    space(28)
+    page.drawText(safe(title), { x: left, y, size: 12, font: bold, color: brand })
+    y -= 13
+    page.drawLine({ start: { x: left, y: y - 2 }, end: { x: right, y: y - 2 }, thickness: 0.55, color: border })
     y -= 12
   }
-
-  line('Certificate of Completion', { size: 20, f: bold, color: brand, gap: 8 })
-  line('This document was signed electronically through eSign Doc Builder.', { color: grey, gap: 14 })
-  rule()
-  const kv = (k, v) => {
-    if (y < 60) {
-      page = pdf.addPage([W, H])
-      y = H - 56
-    }
-    page.drawText(safe(k), { x: 48, y, size: 8.5, font: bold, color: grey })
-    page.drawText(safe(v), { x: 170, y, size: 9.5, font, color: ink, maxWidth: W - 218 })
-    y -= 15
+  newPage()
+  section('Document Information')
+  for (const line of auditWrap('This document was signed electronically through eSign Doc Builder.', font, 8.5, right - left)) {
+    page.drawText(line, { x: left, y, size: 8.5, font, color: muted })
+    y -= 11
   }
-  kv('Document', c.Name)
-  kv('Contract ID', c.Id)
-  kv('Workflow', c.WorkflowName)
-  kv('Sent by', `${c.SenderName ?? '-'} (${c.SenderEmail ?? '-'}), ${c.OrgName}`)
-  kv('Signing order', c.SigningMethod === 'parallel' ? 'Parallel' : 'Sequential')
-  kv('Created', fmt(c.CreatedAt))
-  kv('Completed', fmt(c.CompletedAt || new Date()))
-  kv('Original file', original.FileName)
-  kv('Original SHA-256', original.Sha256)
-  y -= 8
-  rule()
-
-  const reviewers = signers.filter((s) => s.Kind === 'reviewer')
-  if (reviewers.length) {
-    line('Reviewers', { size: 13, f: bold, gap: 10 })
-    for (const s of reviewers) {
-      line(`${s.Name}`, { size: 11, f: bold, gap: 5 })
-      line(`Email: ${s.Email}`)
-      line(`Invited: ${fmt(s.InvitedAt)}    Viewed: ${fmt(s.ViewedAt)}`)
-      line(`Approved: ${fmt(s.SignedAt)}    IP address: ${s.SignedIp ?? '-'}`)
-      if (s.ReviewComment) line(`Comment: ${s.ReviewComment}`)
-      line(`Device: ${(s.SignedUserAgent ?? '-').slice(0, 110)}`, { size: 7.5, color: grey, gap: 10 })
-      rule()
-    }
+  y -= 3
+  const sender = [c.SenderName, c.SenderEmail ? `(${c.SenderEmail})` : null, c.OrgName].filter(Boolean).join(' - ')
+  const metadata = [
+    ['Document Name', c.Name],
+    ['Document ID / Contract ID', c.Id],
+    ['Workflow Name', c.WorkflowName],
+    ['Document Hash (SHA-256)', signed?.Sha256],
+    ['Status', c.Status],
+    ['Sent by', sender],
+    ['Signing order', c.SigningMethod === 'parallel' ? 'Parallel' : c.SigningMethod === 'sequential' ? 'Sequential' : null],
+    ['Created Date and Time', fullTimestamp(c.CreatedAt)],
+    ['Completed Date and Time', fullTimestamp(c.CompletedAt)],
+    ['Original Document Name', original.FileName],
+    ['Original Document SHA-256', original.Sha256],
+    ['Stamping Details', c.Estamping],
+  ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '')
+  for (const [label, value] of metadata) {
+    const lines = auditWrap(value, font, 8.5, right - 190)
+    const height = Math.max(17, lines.length * 10 + 5)
+    space(height)
+    page.drawText(safe(label), { x: left, y, size: 8.2, font: bold, color: muted })
+    lines.forEach((line, i) => page.drawText(line, { x: 190, y: y - i * 10, size: 8.5, font, color: ink }))
+    y -= height
+    page.drawLine({ start: { x: left, y: y + 3 }, end: { x: right, y: y + 3 }, thickness: 0.35, color: border })
+    y -= 2
   }
 
-  line('Signers', { size: 13, f: bold, gap: 10 })
-  for (const [i, s] of signers.filter((x) => x.Kind !== 'reviewer').entries()) {
-    if (y < (s.PhotoImage ? 250 : 150)) {
-      page = pdf.addPage([W, H])
-      y = H - 56
+  const about = 'This audit trail provides a chronological record of activities performed during the electronic signing process. It captures document events, participant actions, timestamps, verification details, and completion information to support transparency and traceability.'
+  const aboutLines = auditWrap(about, font, 8.5, right - left - 24)
+  const aboutHeight = 32 + aboutLines.length * 11
+  space(aboutHeight)
+  page.drawRectangle({ x: left, y: y - aboutHeight + 4, width: right - left, height: aboutHeight, color: pale })
+  page.drawText('About the Audit Trail', { x: left + 12, y: y - 12, size: 9.5, font: bold, color: brand })
+  aboutLines.forEach((line, i) => page.drawText(line, { x: left + 12, y: y - 28 - i * 11, size: 8.5, font, color: ink }))
+  y -= aboutHeight + 12
+
+  section('Participants')
+  const participants = signers.map((s, i) => ({ ...s, serial: i + 1, role: s.Kind === 'reviewer' ? 'Reviewer' : 'Signer' }))
+  if (c.SenderName || c.SenderEmail) {
+    const senderParticipant = participants.find((s) => s.Email?.toLowerCase() === c.SenderEmail?.toLowerCase())
+    if (senderParticipant) senderParticipant.role += ' / Invitation Sender'
+    else participants.push({ serial: participants.length + 1, Name: c.SenderName, Email: c.SenderEmail, Kind: 'sender', role: 'Invitation Sender' })
+  }
+  const participantHeading = (participant, continuation = false, card = false) => {
+    const text = `${participant.serial}. ${participant.Name || 'Participant'} - ${participant.role}${continuation ? ' (continued)' : ''}`
+    const lines = auditWrap(text, bold, 9, right - left - 16)
+    const height = lines.length * 11 + 8
+    space(height)
+    if (card) page.drawRectangle({ x: left, y: y - height + 6, width: right - left, height, color: pale })
+    for (const line of lines) {
+      page.drawText(line, { x: left + (card ? 8 : 0), y, size: 9, font: bold, color: brand })
+      y -= 11
     }
-    const top = y
-    line(`${i + 1}. ${s.Name}`, { size: 11, f: bold, gap: 5 })
-    line(`Email: ${s.Email}`)
-    const look = s.SignatureType === 'stamp' ? 'generated' : s.SignatureType === 'type' ? 'typed' : 'drawn'
-    line(`Method: ${METHOD_LABELS[s.SignedMethod ?? s.Method] ?? s.SignedMethod ?? s.Method ?? 'Electronic signature'} (${look} signature)`)
-    if (s.Verification) line(`Verification: ${s.Verification.slice(0, 110)}`)
-    line(`Invited: ${fmt(s.InvitedAt)}    Viewed: ${fmt(s.ViewedAt)}`)
-    line(`Signed: ${fmt(s.SignedAt)}    IP address: ${s.SignedIp ?? '-'}`)
+    y -= 2
+  }
+  for (const s of participants) {
+    participantHeading(s, false, true)
+    const method = s.SignedMethod ?? s.Method
+    const signatureType = s.SignatureType === 'stamp' ? 'Generated' : s.SignatureType === 'type' ? 'Typed' : s.SignatureType === 'draw' ? 'Drawn' : null
     const loc = s.LocationJson ? JSON.parse(s.LocationJson) : null
-    if (loc) {
-      line(`Location: ${loc.lat}, ${loc.lng}${loc.accuracy != null ? ` (within ${loc.accuracy} m)` : ''}    https://maps.google.com/?q=${loc.lat},${loc.lng}`)
-      if (s.LocationAddress) line(`Address: ${s.LocationAddress.slice(0, 120)}`)
-    }
-    line(`Device: ${(s.SignedUserAgent ?? '-').slice(0, 110)}`, { size: 7.5, color: grey, gap: 10 })
-    if (s.PhotoImage) {
-      const photo = await pdf.embedJpg(Buffer.from(s.PhotoImage.split(',')[1] ?? '', 'base64')).catch(() => null)
-      if (photo) {
-        const ph = 84
-        const pw = (photo.width / photo.height) * ph
-        line('Live photo:', { size: 8, color: grey, gap: 2 })
-        page.drawImage(photo, { x: 48, y: y - ph, width: pw, height: ph })
-        y -= ph + 10
+    const details = [
+      ['Email', s.Email],
+      ['Role', s.role],
+      ['Signing method', method ? (METHOD_LABELS[method] ?? method) : null],
+      ['Signature type', signatureType],
+      ['Verification method / status', s.Verification],
+      ['Participant status', s.Kind === 'sender' ? null : s.DeclinedAt ? (s.Kind === 'reviewer' ? 'Rejected' : 'Declined') : s.Signed ? (s.Kind === 'reviewer' ? 'Approved' : 'Signed') : 'Pending'],
+      ['Invitation timestamp', fullTimestamp(s.InvitedAt)],
+      ['Viewed timestamp', fullTimestamp(s.ViewedAt)],
+      [s.Kind === 'reviewer' ? 'Approved timestamp' : 'Signed timestamp', fullTimestamp(s.SignedAt)],
+      ['IP address', s.SignedIp],
+      ['Device information', s.SignedUserAgent],
+      ['Browser / operating system', auditBrowser(s.SignedUserAgent)],
+      ['Review comment', s.ReviewComment],
+      ['Decline reason', s.DeclineReason],
+      ['Location', loc ? `${loc.lat}, ${loc.lng}${loc.accuracy != null ? ` (accuracy ${loc.accuracy} m)` : ''}` : null],
+      ['Map URL', loc ? `https://maps.google.com/?q=${loc.lat},${loc.lng}` : null],
+      ['Location address', s.LocationAddress],
+    ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '')
+    for (const [label, value] of details) {
+      const lines = auditWrap(value, font, 8, right - 178)
+      for (let i = 0; i < lines.length; i += 1) {
+        if (y - 10 < bottom) {
+          newPage()
+          participantHeading(s, true)
+        }
+        if (i === 0) page.drawText(safe(label), { x: left + 8, y, size: 7.7, font: bold, color: muted })
+        page.drawText(lines[i], { x: 178, y, size: 8, font, color: ink })
+        y -= 10
       }
     }
-    const img = images.get(s.SignerOrder)
-    if (img) {
-      const scale = Math.min(130 / img.width, 46 / img.height)
-      page.drawRectangle({ x: W - 198, y: top - 56, width: 150, height: 60, borderColor: rgb(0.88, 0.87, 0.93), borderWidth: 0.8 })
-      page.drawImage(img, { x: W - 123 - (img.width * scale) / 2, y: top - 26 - (img.height * scale) / 2, width: img.width * scale, height: img.height * scale })
+
+    const signature = images.get(s.SignerOrder)
+    if (signature) {
+      if (y - 62 < bottom) {
+        newPage()
+        participantHeading(s, true)
+      }
+      const scale = Math.min(145 / signature.width, 48 / signature.height)
+      const width = signature.width * scale
+      const height = signature.height * scale
+      page.drawText('Signature', { x: left + 8, y, size: 7.7, font: bold, color: muted })
+      page.drawImage(signature, { x: 178, y: y - height + 5, width, height })
+      y -= Math.max(55, height) + 4
     }
-    rule()
+    if (s.PhotoImage) {
+      try {
+        const photo = await pdf.embedJpg(Buffer.from(s.PhotoImage.split(',')[1] ?? '', 'base64'))
+        if (y - 76 < bottom) {
+          newPage()
+          participantHeading(s, true)
+        }
+        const scale = Math.min(100 / photo.width, 58 / photo.height)
+        const width = photo.width * scale
+        const height = photo.height * scale
+        page.drawText('Live photo evidence', { x: left + 8, y, size: 7.7, font: bold, color: muted })
+        page.drawImage(photo, { x: 178, y: y - height + 5, width, height })
+        y -= Math.max(65, height) + 4
+      } catch {
+        console.warn(`[signing] a live photo could not be embedded for contract ${contractId}`)
+      }
+    }
+    y -= 5
+    page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 0.45, color: border })
+    y -= 10
   }
 
-  line('Audit trail', { size: 13, f: bold, gap: 10 })
-  const nameOf = (order) => signers.find((s) => s.SignerOrder === order)?.Name
-  for (const e of events) {
-    const who = e.SignerOrder ? ` - ${nameOf(e.SignerOrder) ?? `signer ${e.SignerOrder}`}` : ''
-    line(`${fmt(e.CreatedAt)}   ${e.Event.toUpperCase()}${who}${e.Detail ? `: ${e.Detail}` : ''}${e.IpAddress ? `  [${e.IpAddress}]` : ''}`, { size: 8, gap: 5 })
+  section('Audit Event History')
+  const columns = [
+    { title: 'Sr. No.', x: left, width: 36 },
+    { title: 'Date & Time', x: left + 36, width: 96 },
+    { title: 'Participant', x: left + 132, width: 90 },
+    { title: 'Activity', x: left + 222, width: 90 },
+    { title: 'Details', x: left + 312, width: right - left - 312 },
+  ]
+  const eventHeader = () => {
+    space(25)
+    page.drawRectangle({ x: left, y: y - 5, width: right - left, height: 19, color: pale })
+    for (const column of columns) page.drawText(column.title, { x: column.x + 3, y, size: 7.2, font: bold, color: brand })
+    y -= 20
+  }
+  eventHeader()
+  for (const [index, event] of events.entries()) {
+    if (y < bottom + 20) eventHeader()
+    const participant = event.SignerOrder ? signers.find((s) => s.SignerOrder === event.SignerOrder)?.Name : null
+    const detail = [event.Detail, event.IpAddress ? `IP: ${event.IpAddress}` : null].filter(Boolean).join(' | ')
+    const values = [String(index + 1), fullTimestamp(event.CreatedAt) || '', participant || '', String(event.Event || '').replace(/[_-]+/g, ' '), detail]
+    const lines = values.map((value, cell) => auditWrap(value, font, 7.1, columns[cell].width - 7))
+    let offset = 0
+    while (lines.some((cell) => offset < cell.length)) {
+      const capacity = Math.max(1, Math.floor((y - bottom - 8) / 8.5))
+      const remaining = lines.map((cell) => Math.max(0, cell.length - offset)).filter(Boolean)
+      const count = Math.max(1, Math.min(capacity, Math.max(...remaining)))
+      for (let line = 0; line < count; line += 1) {
+        for (let cell = 0; cell < lines.length; cell += 1) {
+          const value = lines[cell][offset + line]
+          if (value) page.drawText(value, { x: columns[cell].x + 3, y: y - line * 8.5, size: 7.1, font, color: ink })
+        }
+      }
+      y -= count * 8.5 + 6
+      offset += count
+      page.drawLine({ start: { x: left, y: y + 3 }, end: { x: right, y: y + 3 }, thickness: 0.35, color: border })
+      if (lines.some((cell) => offset < cell.length)) eventHeader()
+    }
   }
 
+  pages.forEach((pdfPage, index) => {
+    pdfPage.drawLine({ start: { x: left, y: 43 }, end: { x: right, y: 43 }, thickness: 0.55, color: border })
+    const footer = `${config.auditTrail.subtitle || 'Jayam Solutions Ltd'} | Digitally generated Audit Trail | Document ${safe(c.Id)}`
+    pdfPage.drawText(footer, { x: left, y: 29, size: 6.7, font, color: muted, maxWidth: 400 })
+    const pageNumber = `Page ${index + 1} of ${pages.length}`
+    pdfPage.drawText(pageNumber, { x: right - font.widthOfTextAtSize(pageNumber, 7), y: 29, size: 7, font, color: muted })
+  })
   return Buffer.from(await pdf.save())
 }
 
