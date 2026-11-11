@@ -190,7 +190,7 @@ async function loadForPdf(contractId, includeSignedHash = false) {
     { contractId },
   )
   const signers = await query(
-    `SELECT SignerOrder, RoleId, Kind, Name, Email, Method, SignedMethod, Verification, LocationJson, LocationAddress, PhotoImage, Signed, SignedAt, DeclinedAt, DeclineReason, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
+    `SELECT SignerOrder, RoleId, Kind, Name, Email, Phone, Method, SignedMethod, Verification, VerificationJson, LocationJson, LocationAddress, PhotoImage, Signed, SignedAt, DeclinedAt, DeclineReason, InvitedAt, ViewedAt, SignatureImage, SignatureType, SignedIp, SignedUserAgent, ReviewComment
      FROM ${t.ContractSigners} WHERE ContractId = @contractId ORDER BY SignerOrder`,
     { contractId },
   )
@@ -345,7 +345,7 @@ function auditBrowser(userAgent) {
 
 // Branded, paginated rendering of the stored completion and audit evidence.
 export async function buildAuditTrailPdf(contractId) {
-  const { c, signers, events, original, signed } = await loadForPdf(contractId, true)
+  const { c, signers, original, signed } = await loadForPdf(contractId, true)
   if (!c || !original) throw new Error('The contract document is missing')
 
   const pdf = await PDFDocument.create()
@@ -355,7 +355,7 @@ export async function buildAuditTrailPdf(contractId) {
   const ink = rgb(0.12, 0.15, 0.2)
   const muted = rgb(0.38, 0.42, 0.49)
   const brand = rgb(0.16, 0.31, 0.53)
-  const pale = rgb(0.95, 0.97, 0.99)
+  const pale = rgb(0.94, 0.97, 0.99)
   const border = rgb(0.84, 0.87, 0.91)
   const images = new Map()
   for (const signer of signers) {
@@ -367,11 +367,16 @@ export async function buildAuditTrailPdf(contractId) {
       console.warn(`[signing] signature image could not be embedded for contract ${contractId}, signer order ${signer.SignerOrder}`)
     }
   }
+
   const W = 595
   const H = 842
-  const left = 44
-  const right = W - 44
+  const left = 46
+  const right = W - 46
   const bottom = 58
+  const labelX = left + 10
+  const valueX = left + 152
+  const valueWidth = right - valueX - 10
+  const rowLeading = 11.5
   const pages = []
   let page
   let y
@@ -380,35 +385,40 @@ export async function buildAuditTrailPdf(contractId) {
     page = pdf.addPage([W, H])
     pages.push(page)
     if (logo) {
-      const scale = Math.min(128 / logo.width, 36 / logo.height)
+      const scale = Math.min(132 / logo.width, 36 / logo.height)
       const width = logo.width * scale
       const height = logo.height * scale
-      page.drawImage(logo, { x: left, y: 812 - height, width, height })
-      if (config.auditTrail.subtitle) page.drawText(safe(config.auditTrail.subtitle), { x: left, y: 797 - height, size: 8, font, color: muted })
+      page.drawImage(logo, { x: left, y: 790, width, height })
+      if (config.auditTrail.subtitle) page.drawText(safe(config.auditTrail.subtitle), { x: left, y: 776, size: 8.5, font, color: muted })
     } else if (config.auditTrail.subtitle) {
-      page.drawText(safe(config.auditTrail.subtitle), { x: left, y: 792, size: 9, font: bold, color: brand })
+      page.drawText(safe(config.auditTrail.subtitle), { x: left, y: 794, size: 9, font: bold, color: brand })
     }
-    page.drawText('AUDIT TRAIL', { x: 360, y: 794, size: 16, font: bold, color: brand })
-    page.drawLine({ start: { x: left, y: 740 }, end: { x: right, y: 740 }, thickness: 0.8, color: border })
-    y = 720
+    const title = 'AUDIT TRAIL'
+    page.drawText(title, { x: right - bold.widthOfTextAtSize(title, 17), y: 801, size: 17, font: bold, color: brand })
+    page.drawLine({ start: { x: left, y: 760 }, end: { x: right, y: 760 }, thickness: 0.75, color: border })
+    y = 742
   }
   const space = (height) => {
     if (y - height < bottom) newPage()
   }
   const section = (title) => {
-    space(28)
+    space(32)
     page.drawText(safe(title), { x: left, y, size: 12, font: bold, color: brand })
-    y -= 13
-    page.drawLine({ start: { x: left, y: y - 2 }, end: { x: right, y: y - 2 }, thickness: 0.55, color: border })
-    y -= 12
+    y -= 6
+    page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 0.5, color: border })
+    y -= 14
   }
+  const available = (value) => value !== null && value !== undefined && String(value).trim() !== ''
+  const parseJson = (value) => {
+    try {
+      return value ? JSON.parse(value) : null
+    } catch {
+      return null
+    }
+  }
+
   newPage()
   section('Document Information')
-  for (const line of auditWrap('This document was signed electronically through eSign Doc Builder.', font, 8.5, right - left)) {
-    page.drawText(line, { x: left, y, size: 8.5, font, color: muted })
-    y -= 11
-  }
-  y -= 3
   const sender = [c.SenderName, c.SenderEmail ? `(${c.SenderEmail})` : null, c.OrgName].filter(Boolean).join(' - ')
   const metadata = [
     ['Document Name', c.Name],
@@ -416,170 +426,165 @@ export async function buildAuditTrailPdf(contractId) {
     ['Workflow Name', c.WorkflowName],
     ['Document Hash (SHA-256)', signed?.Sha256],
     ['Status', c.Status],
-    ['Sent by', sender],
-    ['Signing order', c.SigningMethod === 'parallel' ? 'Parallel' : c.SigningMethod === 'sequential' ? 'Sequential' : null],
+    ['Sent By', sender],
+    ['Signing Order', c.SigningMethod === 'parallel' ? 'Parallel' : c.SigningMethod === 'sequential' ? 'Sequential' : null],
     ['Created Date and Time', fullTimestamp(c.CreatedAt)],
     ['Completed Date and Time', fullTimestamp(c.CompletedAt)],
     ['Original Document Name', original.FileName],
     ['Original Document SHA-256', original.Sha256],
-    ['Stamping Details', c.Estamping],
-  ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '')
+    ['Stamp Details', c.Estamping],
+  ].filter(([, value]) => available(value))
+
   for (const [label, value] of metadata) {
-    const lines = auditWrap(value, font, 8.5, right - 190)
-    const height = Math.max(17, lines.length * 10 + 5)
+    const lines = auditWrap(value, font, 9, valueWidth)
+    const height = Math.max(19, lines.length * rowLeading + 7)
     space(height)
-    page.drawText(safe(label), { x: left, y, size: 8.2, font: bold, color: muted })
-    lines.forEach((line, i) => page.drawText(line, { x: 190, y: y - i * 10, size: 8.5, font, color: ink }))
+    lines.forEach((line, index) => {
+      const baseline = y - 10 - index * rowLeading
+      if (index === 0) page.drawText(safe(label), { x: labelX, y: baseline, size: 8.2, font: bold, color: muted })
+      page.drawText(line, { x: valueX, y: baseline, size: 9, font, color: ink })
+    })
     y -= height
     page.drawLine({ start: { x: left, y: y + 3 }, end: { x: right, y: y + 3 }, thickness: 0.35, color: border })
-    y -= 2
+    y -= 3
   }
 
-  const about = 'This audit trail provides a chronological record of activities performed during the electronic signing process. It captures document events, participant actions, timestamps, verification details, and completion information to support transparency and traceability.'
-  const aboutLines = auditWrap(about, font, 8.5, right - left - 24)
+  const about = 'This audit trail provides a record of the electronic signing process, including document information, participant identities, verification details and signing timestamps.'
+  const aboutLines = auditWrap(about, font, 9, right - left - 28)
   const aboutHeight = 32 + aboutLines.length * 11
-  space(aboutHeight)
+  space(aboutHeight + 12)
   page.drawRectangle({ x: left, y: y - aboutHeight + 4, width: right - left, height: aboutHeight, color: pale })
-  page.drawText('About the Audit Trail', { x: left + 12, y: y - 12, size: 9.5, font: bold, color: brand })
-  aboutLines.forEach((line, i) => page.drawText(line, { x: left + 12, y: y - 28 - i * 11, size: 8.5, font, color: ink }))
+  page.drawText('About the Audit Trail', { x: left + 12, y: y - 13, size: 10, font: bold, color: brand })
+  aboutLines.forEach((line, index) => page.drawText(line, { x: left + 12, y: y - 29 - index * 11, size: 9, font, color: ink }))
   y -= aboutHeight + 12
 
   section('Participants')
-  const participants = signers.map((s, i) => ({ ...s, serial: i + 1, role: s.Kind === 'reviewer' ? 'Reviewer' : 'Signer' }))
+  const participants = signers.map((s, index) => ({ ...s, serial: index + 1, role: s.Kind === 'reviewer' ? 'Reviewer' : 'Signer' }))
   if (c.SenderName || c.SenderEmail) {
     const senderParticipant = participants.find((s) => s.Email?.toLowerCase() === c.SenderEmail?.toLowerCase())
     if (senderParticipant) senderParticipant.role += ' / Invitation Sender'
     else participants.push({ serial: participants.length + 1, Name: c.SenderName, Email: c.SenderEmail, Kind: 'sender', role: 'Invitation Sender' })
   }
-  const participantHeading = (participant, continuation = false, card = false) => {
-    const text = `${participant.serial}. ${participant.Name || 'Participant'} - ${participant.role}${continuation ? ' (continued)' : ''}`
-    const lines = auditWrap(text, bold, 9, right - left - 16)
-    const height = lines.length * 11 + 8
-    space(height)
-    if (card) page.drawRectangle({ x: left, y: y - height + 6, width: right - left, height, color: pale })
-    for (const line of lines) {
-      page.drawText(line, { x: left + (card ? 8 : 0), y, size: 9, font: bold, color: brand })
-      y -= 11
-    }
-    y -= 2
-  }
-  for (const s of participants) {
-    participantHeading(s, false, true)
-    const method = s.SignedMethod ?? s.Method
-    const signatureType = s.SignatureType === 'stamp' ? 'Generated' : s.SignatureType === 'type' ? 'Typed' : s.SignatureType === 'draw' ? 'Drawn' : null
-    const loc = s.LocationJson ? JSON.parse(s.LocationJson) : null
-    const details = [
-      ['Email', s.Email],
-      ['Role', s.role],
-      ['Signing method', method ? (METHOD_LABELS[method] ?? method) : null],
-      ['Signature type', signatureType],
-      ['Verification method / status', s.Verification],
-      ['Participant status', s.Kind === 'sender' ? null : s.DeclinedAt ? (s.Kind === 'reviewer' ? 'Rejected' : 'Declined') : s.Signed ? (s.Kind === 'reviewer' ? 'Approved' : 'Signed') : 'Pending'],
-      ['Invitation timestamp', fullTimestamp(s.InvitedAt)],
-      ['Viewed timestamp', fullTimestamp(s.ViewedAt)],
-      [s.Kind === 'reviewer' ? 'Approved timestamp' : 'Signed timestamp', fullTimestamp(s.SignedAt)],
-      ['IP address', s.SignedIp],
-      ['Device information', s.SignedUserAgent],
-      ['Browser / operating system', auditBrowser(s.SignedUserAgent)],
-      ['Review comment', s.ReviewComment],
-      ['Decline reason', s.DeclineReason],
-      ['Location', loc ? `${loc.lat}, ${loc.lng}${loc.accuracy != null ? ` (accuracy ${loc.accuracy} m)` : ''}` : null],
-      ['Map URL', loc ? `https://maps.google.com/?q=${loc.lat},${loc.lng}` : null],
-      ['Location address', s.LocationAddress],
-    ].filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '')
-    for (const [label, value] of details) {
-      const lines = auditWrap(value, font, 8, right - 178)
-      for (let i = 0; i < lines.length; i += 1) {
-        if (y - 10 < bottom) {
-          newPage()
-          participantHeading(s, true)
-        }
-        if (i === 0) page.drawText(safe(label), { x: left + 8, y, size: 7.7, font: bold, color: muted })
-        page.drawText(lines[i], { x: 178, y, size: 8, font, color: ink })
-        y -= 10
-      }
-    }
 
-    const signature = images.get(s.SignerOrder)
-    if (signature) {
-      if (y - 62 < bottom) {
-        newPage()
-        participantHeading(s, true)
-      }
-      const scale = Math.min(145 / signature.width, 48 / signature.height)
-      const width = signature.width * scale
-      const height = signature.height * scale
-      page.drawText('Signature', { x: left + 8, y, size: 7.7, font: bold, color: muted })
-      page.drawImage(signature, { x: 178, y: y - height + 5, width, height })
-      y -= Math.max(55, height) + 4
-    }
-    if (s.PhotoImage) {
+  for (const participant of participants) {
+    const method = participant.SignedMethod ?? participant.Method
+    const signatureType = participant.SignatureType === 'stamp' ? 'Generated' : participant.SignatureType === 'type' ? 'Typed' : participant.SignatureType === 'draw' ? 'Drawn' : null
+    const location = parseJson(participant.LocationJson)
+    const evidence = parseJson(participant.VerificationJson)
+    const certificate = evidence?.certificate
+    const locationText = location && available(location.lat) && available(location.lng)
+      ? `${location.lat}, ${location.lng}${location.accuracy != null ? ` (accuracy ${location.accuracy} m)` : ''}`
+      : null
+    const details = [
+      ['Email', participant.Email],
+      ['Phone', participant.Phone],
+      ['Role', participant.role],
+      ['Signing Method', method ? (METHOD_LABELS[method] ?? method) : null],
+      ['Signature Type', signatureType],
+      ['Verification Method / Status', participant.Verification],
+      ['Participant Status', participant.Kind === 'sender' ? null : participant.DeclinedAt ? (participant.Kind === 'reviewer' ? 'Rejected' : 'Declined') : participant.Signed ? (participant.Kind === 'reviewer' ? 'Approved' : 'Signed') : 'Pending'],
+      ['Invitation Date', fullTimestamp(participant.InvitedAt)],
+      ['Viewed Date', fullTimestamp(participant.ViewedAt)],
+      [participant.Kind === 'reviewer' ? 'Approved Date' : 'Signed Date', fullTimestamp(participant.SignedAt)],
+      ['IP Address', participant.SignedIp],
+      ['Browser / Operating System', auditBrowser(participant.SignedUserAgent)],
+      ['Device Details', participant.SignedUserAgent],
+      ['Review Comment', participant.ReviewComment],
+      ['Decline Reason', participant.DeclineReason],
+      ['Location', locationText],
+      ['Location Address', participant.LocationAddress],
+      ['Certificate Subject', certificate?.subject],
+      ['Certificate Issuer', certificate?.issuer],
+      ['Certificate Serial', certificate?.serial],
+      ['Certificate Valid Until', certificate?.validTo],
+    ].filter(([, value]) => available(value))
+    const rows = details.map(([label, value]) => ({ label, lines: auditWrap(value, font, 8.6, valueWidth) }))
+    const signature = images.get(participant.SignerOrder)
+    let photo = null
+    if (participant.PhotoImage) {
       try {
-        const photo = await pdf.embedJpg(Buffer.from(s.PhotoImage.split(',')[1] ?? '', 'base64'))
-        if (y - 76 < bottom) {
-          newPage()
-          participantHeading(s, true)
-        }
-        const scale = Math.min(100 / photo.width, 58 / photo.height)
-        const width = photo.width * scale
-        const height = photo.height * scale
-        page.drawText('Live photo evidence', { x: left + 8, y, size: 7.7, font: bold, color: muted })
-        page.drawImage(photo, { x: 178, y: y - height + 5, width, height })
-        y -= Math.max(65, height) + 4
+        photo = await pdf.embedJpg(Buffer.from(participant.PhotoImage.split(',')[1] ?? '', 'base64'))
       } catch {
         console.warn(`[signing] a live photo could not be embedded for contract ${contractId}`)
       }
     }
-    y -= 5
-    page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 0.45, color: border })
-    y -= 10
-  }
+    const imageSize = (image, maxWidth, maxHeight) => {
+      if (!image) return null
+      const scale = Math.min(maxWidth / image.width, maxHeight / image.height)
+      return { width: image.width * scale, height: image.height * scale }
+    }
+    const signatureSize = imageSize(signature, 145, 44)
+    const photoSize = imageSize(photo, 100, 54)
+    const headingText = `Participant ${participant.serial}${available(participant.Name) ? ` - ${participant.Name}` : ''}`
+    const headingLines = auditWrap(headingText, bold, 9.5, right - left - 24)
+    const headingHeight = headingLines.length * 12 + 11
+    const estimatedHeight = headingHeight + rows.reduce((height, row) => height + Math.max(rowLeading, row.lines.length * rowLeading) + 8, 0) +
+      (signatureSize ? Math.max(16, signatureSize.height) + 11 : 0) + (photoSize ? Math.max(16, photoSize.height) + 11 : 0) + 12
+    if (estimatedHeight <= 742 - bottom && y - estimatedHeight < bottom) newPage()
 
-  section('Audit Event History')
-  const columns = [
-    { title: 'Sr. No.', x: left, width: 36 },
-    { title: 'Date & Time', x: left + 36, width: 96 },
-    { title: 'Participant', x: left + 132, width: 90 },
-    { title: 'Activity', x: left + 222, width: 90 },
-    { title: 'Details', x: left + 312, width: right - left - 312 },
-  ]
-  const eventHeader = () => {
-    space(25)
-    page.drawRectangle({ x: left, y: y - 5, width: right - left, height: 19, color: pale })
-    for (const column of columns) page.drawText(column.title, { x: column.x + 3, y, size: 7.2, font: bold, color: brand })
-    y -= 20
-  }
-  eventHeader()
-  for (const [index, event] of events.entries()) {
-    if (y < bottom + 20) eventHeader()
-    const participant = event.SignerOrder ? signers.find((s) => s.SignerOrder === event.SignerOrder)?.Name : null
-    const detail = [event.Detail, event.IpAddress ? `IP: ${event.IpAddress}` : null].filter(Boolean).join(' | ')
-    const values = [String(index + 1), fullTimestamp(event.CreatedAt) || '', participant || '', String(event.Event || '').replace(/[_-]+/g, ' '), detail]
-    const lines = values.map((value, cell) => auditWrap(value, font, 7.1, columns[cell].width - 7))
-    let offset = 0
-    while (lines.some((cell) => offset < cell.length)) {
-      const capacity = Math.max(1, Math.floor((y - bottom - 8) / 8.5))
-      const remaining = lines.map((cell) => Math.max(0, cell.length - offset)).filter(Boolean)
-      const count = Math.max(1, Math.min(capacity, Math.max(...remaining)))
-      for (let line = 0; line < count; line += 1) {
-        for (let cell = 0; cell < lines.length; cell += 1) {
-          const value = lines[cell][offset + line]
-          if (value) page.drawText(value, { x: columns[cell].x + 3, y: y - line * 8.5, size: 7.1, font, color: ink })
-        }
+    const participantHeading = (continued = false) => {
+      const text = continued ? `${headingText} (continued)` : headingText
+      const lines = auditWrap(text, bold, 9.5, right - left - 24)
+      const height = lines.length * 12 + 11
+      if (y - height < bottom) newPage()
+      page.drawRectangle({ x: left, y: y - height + 4, width: right - left, height, color: pale })
+      lines.forEach((line, index) => page.drawText(line, { x: left + 10, y: y - 10 - index * 12, size: 9.5, font: bold, color: brand }))
+      y -= height + 2
+    }
+    participantHeading()
+
+    for (const row of rows) {
+      const rowHeight = Math.max(rowLeading, row.lines.length * rowLeading) + 8
+      if (rowHeight <= 742 - bottom && y - rowHeight < bottom) {
+        newPage()
+        participantHeading(true)
       }
-      y -= count * 8.5 + 6
-      offset += count
-      page.drawLine({ start: { x: left, y: y + 3 }, end: { x: right, y: y + 3 }, thickness: 0.35, color: border })
-      if (lines.some((cell) => offset < cell.length)) eventHeader()
+      y -= 3
+      for (let index = 0; index < row.lines.length; index += 1) {
+        if (y - rowLeading < bottom) {
+          newPage()
+          participantHeading(true)
+          page.drawText(`${safe(row.label)} (continued)`, { x: labelX, y: y - 9, size: 8.2, font: bold, color: muted })
+        } else if (index === 0) {
+          page.drawText(safe(row.label), { x: labelX, y: y - 9, size: 8.2, font: bold, color: muted })
+        }
+        page.drawText(row.lines[index], { x: valueX, y: y - 9, size: 8.6, font, color: ink })
+        y -= rowLeading
+      }
+      y -= 5
+      page.drawLine({ start: { x: left + 8, y }, end: { x: right - 8, y }, thickness: 0.25, color: border })
+    }
+
+    for (const [label, image, size] of [
+      ['Signature Image', signature, signatureSize],
+      ['Live Photo Evidence', photo, photoSize],
+    ]) {
+      if (!image || !size) continue
+      const height = Math.max(16, size.height) + 11
+      if (y - height < bottom) {
+        newPage()
+        participantHeading(true)
+      }
+      page.drawText(label, { x: labelX, y: y - 9, size: 8.2, font: bold, color: muted })
+      page.drawImage(image, { x: valueX, y: y - size.height + 2, width: size.width, height: size.height })
+      y -= height
+    }
+
+    if (y - 10 >= bottom) {
+      y -= 5
+      page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 0.5, color: border })
+      y -= 12
+    } else {
+      y = bottom
     }
   }
 
   pages.forEach((pdfPage, index) => {
     pdfPage.drawLine({ start: { x: left, y: 43 }, end: { x: right, y: 43 }, thickness: 0.55, color: border })
     const footer = `${config.auditTrail.subtitle || 'Jayam Solutions Ltd'} | Digitally generated Audit Trail | Document ${safe(c.Id)}`
-    pdfPage.drawText(footer, { x: left, y: 29, size: 6.7, font, color: muted, maxWidth: 400 })
+    pdfPage.drawText(footer, { x: left, y: 28, size: 6.8, font, color: muted, maxWidth: 400 })
     const pageNumber = `Page ${index + 1} of ${pages.length}`
-    pdfPage.drawText(pageNumber, { x: right - font.widthOfTextAtSize(pageNumber, 7), y: 29, size: 7, font, color: muted })
+    pdfPage.drawText(pageNumber, { x: right - font.widthOfTextAtSize(pageNumber, 7), y: 28, size: 7, font, color: muted })
   })
   return Buffer.from(await pdf.save())
 }
