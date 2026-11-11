@@ -196,12 +196,15 @@ export async function createContract(
   if (new Set(clean.map((s) => s.email)).size !== clean.length) throw badRequest('Each reviewer and signer needs a different email address')
 
   const title = name != null && String(name).trim() ? requireString(name, 'name') : (basic.contractName || wf.Name).slice(0, 200)
-  const ref = externalRef != null && String(externalRef).trim() ? requireString(String(externalRef), 'externalRef', { max: 100 }) : null
-  if (ref) {
-    // Lets callers retry safely: the same reference never creates a second contract
-    const [dup] = await query(`SELECT Id FROM ${t.Contracts} WHERE OrganisationId = @orgId AND ExternalRef = @ref`, { orgId, ref })
-    if (dup) throw Object.assign(new HttpError(409, `A contract with externalRef "${ref}" already exists`), { contractId: dup.Id })
-  }
+const provided = externalRef != null && String(externalRef).trim()
+const ref = provided
+  ? requireString(String(externalRef), 'externalRef', { max: 100 })
+  : String(Date.now())   // e.g. "1794394594479"
+if (provided) {
+  // Lets callers retry safely: the same reference never creates a second contract
+  const [dup] = await query(`SELECT Id FROM ${t.Contracts} WHERE OrganisationId = @orgId AND ExternalRef = @ref`, { orgId, ref })
+  if (dup) throw Object.assign(new HttpError(409, `A contract with externalRef "${ref}" already exists`), { contractId: dup.Id })
+}
 
   const id = newId()
   const now = new Date()
