@@ -589,6 +589,18 @@ function auditBrowser(userAgent) {
 //   return Buffer.from(await pdf.save())
 // }
 
+// Converts a stored PNG/JPEG to greyscale (alpha kept) so the whole report is strictly black and white.
+// Falls back to the original bytes if `sharp` is unavailable, so PDF generation never fails because of it.
+export async function toGrayscaleBytes(bytes) {
+  try {
+    const { default: sharp } = await import('sharp')
+    return new Uint8Array(await sharp(Buffer.from(bytes)).grayscale().png().toBuffer())
+  } catch {
+    return new Uint8Array(bytes)
+  }
+}
+const embedImage = async (doc, bytes) => (bytes[0] === 0x89 && bytes[1] === 0x50 ? doc.embedPng(bytes) : doc.embedJpg(bytes))
+
 export async function buildAuditTrailPdf(contractId) {
   const { c, signers, original, signed } = await loadForPdf(contractId, true)
   if (!c || !original) throw new Error('The contract document is missing')
@@ -603,15 +615,15 @@ export async function buildAuditTrailPdf(contractId) {
   const rule = rgb(0.78, 0.78, 0.8)
   const strongRule = rgb(0.55, 0.55, 0.58)
   const band = rgb(0.95, 0.95, 0.96)
-  const brand = rgb(0.16, 0.31, 0.53)
-  const headingBlue = rgb(0.87, 0.93, 0.98)
-  const gridColor = rgb(0.78, 0.82, 0.88)
+  const brand = rgb(0.07, 0.07, 0.07) // headings: near-black
+  const headingBlue = rgb(0.91, 0.91, 0.92) // header / tag fill: light grey
+  const gridColor = rgb(0.68, 0.68, 0.7)
   const images = new Map()
   for (const signer of signers) {
     const bytes = dataUrlToBytes(signer.SignatureImage)
     if (!bytes) continue
     try {
-      images.set(signer.SignerOrder, await pdf.embedPng(bytes))
+      images.set(signer.SignerOrder, await embedImage(pdf, await toGrayscaleBytes(bytes)))
     } catch {
       console.warn(`[signing] signature image could not be embedded for contract ${contractId}, signer order ${signer.SignerOrder}`)
     }
@@ -766,7 +778,7 @@ export async function buildAuditTrailPdf(contractId) {
   for (const participant of participants) {
     if (!participant.PhotoImage) continue
     try {
-      photos.set(participant.serial, await pdf.embedJpg(new Uint8Array(Buffer.from(participant.PhotoImage.split(',')[1] ?? '', 'base64'))))
+      photos.set(participant.serial, await embedImage(pdf, await toGrayscaleBytes(Buffer.from(participant.PhotoImage.split(',')[1] ?? '', 'base64'))))
     } catch {
       console.warn(`[signing] a live photo could not be embedded for contract ${contractId}`)
     }
@@ -777,8 +789,8 @@ export async function buildAuditTrailPdf(contractId) {
   const padY = 11
   const minRow = 58
   const headerHeight = 28
-  const soft = rgb(0.38, 0.42, 0.49) // muted grey-blue for secondary text
-  const zebra = rgb(0.972, 0.984, 0.996)
+  const soft = rgb(0.34, 0.34, 0.37) // muted grey-blue for secondary text
+  const zebra = rgb(0.965, 0.965, 0.97)
   const col = { sr: { x: left, w: 36 }, name: { x: 0, w: 142 }, date: { x: 0, w: 98 }, details: { x: 0, w: 0 } }
   col.name.x = col.sr.x + col.sr.w
   col.date.x = col.name.x + col.name.w
@@ -792,12 +804,14 @@ export async function buildAuditTrailPdf(contractId) {
   }
   const sigType = (p) => (p.SignatureType === 'stamp' ? 'Generated' : p.SignatureType === 'type' ? 'Typed' : p.SignatureType === 'draw' ? 'Drawn' : null)
   const status = (p) => (p.Kind === 'sender' ? null : p.DeclinedAt ? (p.Kind === 'reviewer' ? 'Rejected' : 'Declined') : p.Signed ? (p.Kind === 'reviewer' ? 'Approved' : 'Signed') : 'Pending')
+  // Monochrome status badges: solid black = completed, outlined = pending, dark grey = declined / rejected.
+  const solid = [rgb(0.07, 0.07, 0.07), rgb(1, 1, 1)]
   const statusColors = {
-    Signed: [rgb(0.87, 0.96, 0.9), rgb(0.08, 0.42, 0.2)],
-    Approved: [rgb(0.87, 0.96, 0.9), rgb(0.08, 0.42, 0.2)],
-    Pending: [rgb(1, 0.95, 0.8), rgb(0.6, 0.38, 0.02)],
-    Declined: [rgb(0.99, 0.88, 0.88), rgb(0.7, 0.14, 0.14)],
-    Rejected: [rgb(0.99, 0.88, 0.88), rgb(0.7, 0.14, 0.14)],
+    Signed: solid,
+    Approved: solid,
+    Pending: [rgb(1, 1, 1), rgb(0.07, 0.07, 0.07)],
+    Declined: [rgb(0.38, 0.38, 0.4), rgb(1, 1, 1)],
+    Rejected: [rgb(0.38, 0.38, 0.4), rgb(1, 1, 1)],
   }
 
   // ---- cell items: each has a height and a draw(x, top) ----
@@ -815,7 +829,7 @@ export async function buildAuditTrailPdf(contractId) {
     return {
       height: 14 + 6,
       draw: (x, top) => {
-        page.drawRectangle({ x, y: top - 14, width, height: 14, color: bg })
+        page.drawRectangle({ x, y: top - 14, width, height: 14, color: bg, borderColor: rgb(0.07, 0.07, 0.07), borderWidth: 0.7 })
         page.drawText(label, { x: x + 6, y: top - 10, size: 7, font: bold, color: fg })
       },
     }
@@ -828,13 +842,7 @@ export async function buildAuditTrailPdf(contractId) {
     page.drawText(text, { x: x + 5, y: top - 9, size: 7.2, font: bold, color: fg })
     return width
   }
-  const green = [rgb(0.87, 0.96, 0.9), rgb(0.08, 0.42, 0.2)]
-  const stampColors = {
-    Invited: [headingBlue, brand],
-    Viewed: [rgb(0.86, 0.95, 0.95), rgb(0.06, 0.4, 0.42)],
-    Signed: green,
-    Approved: green,
-  }
+  const stampColors = {}
   const stampItem = (label, value, width) => {
     const lines = wrapCell(value, font, 8.6, width)
     const [bg, fg] = stampColors[label] ?? [headingBlue, brand]
@@ -891,7 +899,7 @@ export async function buildAuditTrailPdf(contractId) {
     if (available(p.Name)) nameItems.push(textItem(p.Name, bold, 10, ink, nameW, 12.5, 3))
     if (available(p.Email)) nameItems.push(textItem(p.Email, font, 8.2, soft, nameW, 10.4, 2))
     if (available(p.Phone)) nameItems.push(textItem(p.Phone, font, 8.2, soft, nameW, 10.4, 2))
-    if (available(p.role)) nameItems.push({ height: 5, draw: () => {} }, chipItem(p.role, headingBlue, brand, nameW))
+    if (available(p.role)) nameItems.push({ height: 5, spacer: true, draw: () => {} }, chipItem(p.role, headingBlue, brand, nameW))
 
     // Date: small caps label over the value.
     const dateItems = [
@@ -921,13 +929,13 @@ export async function buildAuditTrailPdf(contractId) {
       ['Cert. Valid Until', certificate?.validTo],
     ].filter(([, v]) => available(v)).forEach(([l, v]) => detailItems.push(kvItem(l, v, detailsW)))
     const photo = photos.get(p.serial)
-    if (photo) detailItems.push({ height: 4, draw: () => {} }, imageItem('Live Photo', photo, fitImage(photo, 90, 50)))
+    if (photo) detailItems.push({ height: 4, spacer: true, draw: () => {} }, imageItem('Live Photo', photo, fitImage(photo, 90, 50)))
     const signature = images.get(p.SignerOrder)
-    if (signature) detailItems.push({ height: 4, draw: () => {} }, imageItem('Signature', signature, fitImage(signature, Math.min(detailsW - 16, 170), 46)))
+    if (signature) detailItems.push({ height: 4, spacer: true, draw: () => {} }, imageItem('Signature', signature, fitImage(signature, Math.min(detailsW - 16, 170), 46)))
 
-    const height = Math.max(minRow, stackHeight(nameItems), stackHeight(dateItems), stackHeight(detailItems)) + padY * 2
-    return { p, nameItems, dateItems, detailItems, height }
+    return { p, nameItems, dateItems, detailItems, index: 0 }
   })
+  records.forEach((record, i) => { record.index = i })
 
   const drawHeader = () => {
     page.drawRectangle({ x: left, y: y - headerHeight, width: tableWidth, height: headerHeight, color: headingBlue, borderColor: gridColor, borderWidth: 0.6 })
@@ -939,13 +947,16 @@ export async function buildAuditTrailPdf(contractId) {
     page.drawText('Date', { x: col.date.x + padX, y: baseline, size: 9.5, font: bold, color: brand })
     page.drawText('Details', { x: col.details.x + padX, y: baseline, size: 9.5, font: bold, color: brand })
     y -= headerHeight
-    page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 1.1, color: rgb(0.6, 0.72, 0.88) })
+    page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 1.2, color: rgb(0.07, 0.07, 0.07) })
   }
-  let rowIndex = 0
-  const drawRecord = (record) => {
+  // Draws one slice of a participant row. A participant that does not fit in the space left on a page
+  // continues on the next page (with the header repeated), so pages are filled and no blank gaps are left.
+  const drawPart = (record, parts, continued) => {
     const top = y
-    const rowBottom = top - record.height
-    if (rowIndex % 2 === 1) page.drawRectangle({ x: left, y: rowBottom, width: tableWidth, height: record.height, color: zebra })
+    const contentHeight = Math.max(stackHeight(parts.name), stackHeight(parts.date), stackHeight(parts.details))
+    const height = Math.max(continued ? 40 : minRow, contentHeight + padY * 2)
+    const rowBottom = top - height
+    if (record.index % 2 === 1) page.drawRectangle({ x: left, y: rowBottom, width: tableWidth, height, color: zebra })
     // Outer border, column dividers and a rule under every row.
     page.drawLine({ start: { x: left, y: rowBottom }, end: { x: right, y: rowBottom }, thickness: 0.5, color: gridColor })
     page.drawLine({ start: { x: left, y: top }, end: { x: left, y: rowBottom }, thickness: 0.6, color: gridColor })
@@ -957,22 +968,62 @@ export async function buildAuditTrailPdf(contractId) {
     const num = String(record.p.serial)
     page.drawText(num, { x: cx - bold.widthOfTextAtSize(num, 8.5) / 2, y: top - padY - 12, size: 8.5, font: bold, color: brand })
     // All columns are top-aligned so every row reads straight across.
-    drawStack(record.nameItems, col.name.x + padX, top - padY)
-    drawStack(record.dateItems, col.date.x + padX, top - padY)
-    drawStack(record.detailItems, col.details.x + padX, top - padY)
+    drawStack(parts.name, col.name.x + padX, top - padY)
+    drawStack(parts.date, col.date.x + padX, top - padY)
+    drawStack(parts.details, col.details.x + padX, top - padY)
     y = rowBottom
-    rowIndex += 1
   }
 
-  // Header + first row stay together; rows are never split; the header repeats on every page.
-  if (y - headerHeight - (records[0]?.height ?? 0) < bottom) newPage()
+  let freshPage = false
+  const startNewTablePage = () => {
+    newPage()
+    drawHeader()
+    freshPage = true
+  }
+  // The table starts straight after the About band whenever a useful part of the first row fits.
+  if (y - headerHeight - 130 < bottom) newPage()
   drawHeader()
+
   for (const record of records) {
-    if (y - record.height < bottom) {
-      newPage()
-      drawHeader()
+    const rest = { name: record.nameItems, date: record.dateItems, details: record.detailItems }
+    let continued = false
+    const remaining = () => rest.name.length + rest.date.length + rest.details.length
+    while (remaining() > 0) {
+      const avail = y - bottom - padY * 2
+      const fits = (items) => {
+        let used = 0
+        let n = 0
+        while (n < items.length && used + items[n].height <= avail) {
+          used += items[n].height
+          n += 1
+        }
+        return n
+      }
+      let counts = [fits(rest.name), fits(rest.date), fits(rest.details)]
+      const all = [rest.name, rest.date, rest.details]
+      const everythingFits = counts.every((n, i) => n === all[i].length)
+      const nothingFits = counts.every((n, i) => n === 0 || all[i][0]?.spacer)
+      // Not worth starting a row in a sliver of space: move to the next page (a small gap at most).
+      const sliver = !continued && !everythingFits && avail < 70
+      if ((nothingFits || sliver || y - Math.max(continued ? 40 : minRow, padY * 2 + 20) < bottom) && !freshPage) {
+        startNewTablePage()
+        continue
+      }
+      if (nothingFits) counts = all.map((items) => Math.min(1, items.length)) // item taller than a page: force it
+      const parts = {
+        name: rest.name.slice(0, counts[0]),
+        date: rest.date.slice(0, counts[1]),
+        details: rest.details.slice(0, counts[2]),
+      }
+      rest.name = rest.name.slice(counts[0])
+      rest.date = rest.date.slice(counts[1])
+      rest.details = rest.details.slice(counts[2])
+      for (const key of ['name', 'date', 'details']) while (rest[key][0]?.spacer) rest[key].shift()
+      if (continued && available(record.p.Name)) parts.name.unshift(textItem(`${record.p.Name} (continued)`, bold, 8.6, ink, col.name.w - padX * 2, 10.8, 3))
+      drawPart(record, parts, continued)
+      freshPage = false
+      if (remaining() > 0) continued = true
     }
-    drawRecord(record)
   }
 
   pages.forEach((pdfPage, index) => {
