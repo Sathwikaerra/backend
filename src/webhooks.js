@@ -23,18 +23,44 @@ export const newWebhookSecret = () => `whsec_${crypto.randomBytes(24).toString('
 export const signPayload = (secret, timestamp, body) => `sha256=${crypto.createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex')}`
 
 // https only, except for local receivers while developing
+// export function validateWebhookUrl(value) {
+//   let url
+//   try {
+//     url = new URL(String(value || '').trim())
+//   } catch {
+//     throw badRequest('Enter a full webhook URL, e.g. https://example.com/esign/webhook')
+//   }
+//   const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+//   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) throw badRequest('The webhook URL must start with https://')
+//   if (url.username || url.password) throw badRequest('Do not put a username or password in the webhook URL')
+//   if (url.href.length > 500) throw badRequest('The webhook URL is too long')
+//   return url.href
+// }
+
 export function validateWebhookUrl(value) {
-  let url
+  let url;
+
   try {
-    url = new URL(String(value || '').trim())
+    url = new URL(String(value || "").trim());
   } catch {
-    throw badRequest('Enter a full webhook URL, e.g. https://example.com/esign/webhook')
+    throw badRequest(
+      "Enter a valid webhook URL, e.g. http://example.com/esign/webhook"
+    );
   }
-  const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) throw badRequest('The webhook URL must start with https://')
-  if (url.username || url.password) throw badRequest('Do not put a username or password in the webhook URL')
-  if (url.href.length > 500) throw badRequest('The webhook URL is too long')
-  return url.href
+
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw badRequest("Only HTTP and HTTPS webhook URLs are allowed");
+  }
+
+  if (url.username || url.password) {
+    throw badRequest("Do not put a username or password in the webhook URL");
+  }
+
+  if (url.href.length > 500) {
+    throw badRequest("The webhook URL is too long");
+  }
+
+  return url.href;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
