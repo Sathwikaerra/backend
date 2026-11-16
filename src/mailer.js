@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer'
+import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
 
 const { mail, otp } = config
@@ -36,28 +37,109 @@ export async function sendTestEmail(to) {
   })
 }
 
-const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+const signingLogoPath = fileURLToPath(new URL('./assets/jayam.png', import.meta.url))
+const signingLogoCid = 'esign-doc-builder-jayam-logo'
 
-function otpEmail({ name, code, purpose }) {
+function signingEmailHeader() {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td align="center" style="text-align:center">
+        <img src="cid:${signingLogoCid}" alt="Jayam Solutions Private Limited logo" width="140" style="display:block;width:140px;max-width:100%;height:auto;margin:0 auto;border:0;outline:none;text-decoration:none">
+      </td>
+    </tr>
+    <tr>
+      <td align="center" style="padding-top:12px;font-family:Arial,Helvetica,sans-serif;text-align:center">
+        <div style="font-size:19px;line-height:1.3;font-weight:700;color:#1e3a5f">eSign <span style="color:#2563eb">Doc Builder</span></div>
+        <div style="margin-top:4px;font-size:12px;line-height:1.4;color:#64748b">Secure electronic signing</div>
+      </td>
+    </tr>
+  </table>`
+}
 
-  const action = purpose === 'signup' ? 'finish creating your account' : 'sign in'
-  const subject = purpose === 'signup' ? `${code} is your verification code` : `${code} is your sign-in code`
-  const text = `Hi ${name || 'there'},
+function signingLogoAttachment() {
+  return { filename: 'jayam.png', path: signingLogoPath, cid: signingLogoCid, contentType: 'image/png' }
+}
 
-Use this code to ${action} on eSign Doc Builder:
+export function buildOtpEmail({ name, code, purpose, expiryMinutes = otp.expiryMinutes, contractName }) {
+  const recipientName = String(name ?? '').trim() || 'there'
+  const signing = purpose === 'signing'
+  const action = purpose === 'signup' ? 'finish creating your account' : signing ? 'confirm your identity and sign' : 'sign in'
+  const subject = purpose === 'signup'
+    ? `${code} is your verification code`
+    : signing
+      ? `${code} is your signing code`
+      : `${code} is your sign-in code`
+  const codeInstruction = signing && contractName
+    ? `Use this code to sign "${contractName}" on eSign Doc Builder:`
+    : `Use this code to ${action} on eSign Doc Builder:`
+  const text = `Hi ${recipientName},
+
+${codeInstruction}
 
     ${code}
 
-The code expires in ${otp.expiryMinutes} minutes. If you didn't request it, you can ignore this email; your account is safe.`
-
-  const html = layout({
-    body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name || 'there')},</p>
-          <p style="margin:0 0 20px">Use this code to ${action}:</p>
-          <div style="font-size:32px;font-weight:700;letter-spacing:10px;text-align:center;background:#f4f3fb;border-radius:10px;padding:16px 0;color:#1a1630">${code}</div>
-          <p style="margin:20px 0 0;color:#6d6887;font-size:13px">This code expires in ${otp.expiryMinutes} minutes. Never share it with anyone.
-          If you didn't request it, you can safely ignore this email.</p>`,
-  })
-  return { subject, text, html }
+The code expires in ${expiryMinutes} minutes. Never share it with anyone.${signing ? '' : " If you didn't request it, you can ignore this email; your account is safe."}`
+  const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#f1f5f9;color:#1e293b;font-family:Arial,Helvetica,sans-serif">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;background-color:#f1f5f9">
+      <tr>
+        <td align="center" style="padding:24px 12px">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px">
+            <tr>
+              <td style="padding:22px 24px;border-bottom:1px solid #e2e8f0">
+                ${signingEmailHeader()}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:28px 24px 8px">
+                <h1 style="margin:0;color:#1e3a5f;font-size:24px;line-height:1.3;font-weight:700">${signing ? 'Confirm your identity' : 'Verify your email'}</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:12px 24px 0;color:#334155;font-size:15px;line-height:1.65">
+                <p style="margin:0 0 10px">Hi ${escapeHtml(recipientName)},</p>
+                <p style="margin:0">${escapeHtml(codeInstruction)}</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:22px 24px 0">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;background-color:#eff6ff;border:1px solid #bfdbfe;border-radius:8px">
+                  <tr>
+                    <td align="center" style="padding:20px 16px">
+                      <div style="margin:0 0 8px;color:#1e3a5f;font-size:12px;line-height:1.4;font-weight:700;letter-spacing:1px;text-transform:uppercase">Your verification code</div>
+                      <div style="color:#1e3a5f;font-family:Consolas,'Courier New',monospace;font-size:32px;line-height:1.3;font-weight:700;letter-spacing:8px;word-break:break-all">${escapeHtml(code)}</div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 24px 0;color:#475569;font-size:14px;line-height:1.6">
+                This code expires in <strong style="color:#1e3a5f">${escapeHtml(expiryMinutes)} minutes</strong>. Never share it with anyone.
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 24px 24px;color:#64748b;font-size:12px;line-height:1.6">
+                ${signing
+                  ? 'If you did not request this signing code, you can ignore this email.'
+                  : "If you didn't request this code, you can safely ignore this email."}
+                <br>This is an automated message from eSign Doc Builder. Please do not reply.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`
+  return { subject, text, html, attachments: [signingLogoAttachment()] }
 }
 
 // Shared email frame: brand line, body HTML, optional button, footer
@@ -86,6 +168,150 @@ function layout({ body, button, footer = 'This is an automated message, please d
 const formatDate = (d) => new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
 
 const stamp = () => new Date().toLocaleString('en-GB', { hour12: false })
+
+function formatInvitationDeadline(value) {
+  if (!value) return 'No deadline specified'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'No deadline specified' : formatDate(date)
+}
+
+export function buildSigningInviteEmail({
+  name,
+  contractId,
+  contractName,
+  orgName,
+  senderName,
+  link,
+  expiresAt,
+  subject,
+  review = false,
+  howToSign = '',
+}) {
+  const recipientName = String(name ?? '').trim() || 'there'
+  const documentName = String(contractName ?? '').trim() || 'Untitled document'
+  const sender = String(senderName ?? '').trim()
+  const company = String(orgName ?? '').trim()
+  const senderDisplay = sender ? `${sender}${company ? ` (${company})` : ''}` : company || 'Your organization'
+  const signingUrl = String(link ?? '').trim()
+  if (!signingUrl) throw new Error('A signing URL is required for an invitation')
+
+  const deadline = formatInvitationDeadline(expiresAt)
+  const method = String(howToSign ?? '').trim().replace(/^How you will sign:\s*/i, '')
+  const methodDetails = review ? '' : method || 'Follow the on-screen instructions to complete signing.'
+  const task = review ? 'review and approve before it is sent for signing' : 'review and sign electronically'
+  const action = review ? 'Review document' : 'Review & Sign'
+  const contractIdValue = String(contractId ?? '').trim()
+  const subjectLine = (!review && subject) || `${review ? 'Please review' : 'Please sign'}: ${documentName}`
+  const detailRow = (label, value, extra = '') => `
+    <tr>
+      <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#64748b;font-size:13px;vertical-align:top;width:112px">${label}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#1e293b;font-size:14px;line-height:1.5;vertical-align:top;word-break:break-word;${extra}">${value}</td>
+    </tr>`
+  const contractRow = contractIdValue
+    ? detailRow('Contract ID', escapeHtml(contractIdValue), 'font-family:Consolas,monospace;font-size:12px')
+    : ''
+  const methodRow = methodDetails ? detailRow('Signing method', escapeHtml(methodDetails)) : ''
+  const text = `Hi ${recipientName},
+
+${senderDisplay} has sent you "${documentName}" to ${task}.
+
+Document: ${documentName}
+${contractIdValue ? `Contract ID: ${contractIdValue}\n` : ''}Signing deadline: ${deadline}
+${methodDetails ? `Signing method: ${methodDetails}\n` : ''}
+${review ? 'Review the document' : 'Review and sign'}: ${signingUrl}
+
+This link is personal to you. Please do not forward it. If you were not expecting this document, contact the sender before opening the link.`
+  const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${escapeHtml(subjectLine)}</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#f1f5f9;color:#1e293b;font-family:Arial,Helvetica,sans-serif">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;background-color:#f1f5f9">
+      <tr>
+        <td align="center" style="padding:24px 12px">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px">
+            <tr>
+              <td style="padding:22px 24px;border-bottom:1px solid #e2e8f0">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                  <tr><td>${signingEmailHeader()}</td></tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:28px 24px 8px">
+                <h1 style="margin:0;color:#1e3a5f;font-size:24px;line-height:1.3;font-weight:700">${review ? 'A document is ready for your review' : 'A document is ready for your signature'}</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:12px 24px 0;font-size:15px;line-height:1.65;color:#334155">
+                <p style="margin:0 0 10px">Hi ${escapeHtml(recipientName)},</p>
+                <p style="margin:0"><strong style="color:#1e293b">${escapeHtml(senderDisplay)}</strong> has sent you a document to ${task}.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:22px 24px 0">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px">
+                  <tr>
+                    <td colspan="2" style="padding:13px 12px 8px;color:#1e3a5f;font-size:14px;font-weight:700">Document details</td>
+                  </tr>
+                  ${detailRow('Document', `<strong>${escapeHtml(documentName)}</strong>`)}
+                  ${detailRow('Sender', escapeHtml(senderDisplay))}
+                  ${detailRow('Deadline', escapeHtml(deadline))}
+                  ${methodRow}
+                  ${contractRow}
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="padding:24px 24px 0">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                  <tr>
+                    <td align="center" bgcolor="#2563eb" style="background-color:#2563eb;border-radius:6px">
+                      <a href="${escapeHtml(signingUrl)}" style="display:inline-block;padding:14px 28px;border:1px solid #2563eb;border-radius:6px;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.2;font-weight:700;text-decoration:none">${action}</a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 24px 0;text-align:center;color:#64748b;font-size:12px;line-height:1.6">
+                Button not working? Copy and paste this secure link into your browser:
+                <br><a href="${escapeHtml(signingUrl)}" style="color:#2563eb;text-decoration:underline;word-break:break-all">${escapeHtml(signingUrl)}</a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:20px 24px 0">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;background-color:#eff6ff;border-left:3px solid #2563eb">
+                  <tr>
+                    <td style="padding:12px 14px;color:#334155;font-size:13px;line-height:1.6">
+                      <strong style="color:#1e3a5f">Security notice</strong><br>
+                      This link is personal and confidential. Do not forward it. If you were not expecting this document, contact the sender before opening the link.
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:22px 24px 24px;color:#64748b;font-size:12px;line-height:1.6">
+                This is an automated message from eSign Doc Builder${company ? ` on behalf of ${escapeHtml(company)}` : ''}. Please do not reply.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`
+  return {
+    subject: subjectLine,
+    text,
+    html,
+    attachments: [signingLogoAttachment()],
+  }
+}
 
 // Plain-language hints for the SMTP failures people usually hit
 function hintFor(err) {
@@ -128,7 +354,7 @@ async function deliver(kind, to, message) {
 
 export async function sendOtpEmail({ to, name, code, purpose }) {
   console.log(`[mail] ${stamp()}  SENDING ${purpose} OTP email to ${to}`)
-  const message = otpEmail({ name, code, purpose })
+  const message = buildOtpEmail({ name, code, purpose })
   console.log("Message",message)
   if (!transport) {
     console.log(`\n[mail:dev] ${purpose.toUpperCase()} code for ${to}: ${code}  (expires in ${otp.expiryMinutes} min)`)
@@ -141,25 +367,13 @@ export async function sendOtpEmail({ to, name, code, purpose }) {
 // One-time code a signer enters before signing (Smart eSign)
 export async function sendSigningOtp({ to, name, code, contractName, minutes }) {
   console.log(`[mail] ${stamp()}  SENDING signing code to ${to}`)
-  const text = `Hi ${name || 'there'},
-
-Use this code to sign "${contractName}":
-
-    ${code}
-
-The code expires in ${minutes} minutes. Never share it with anyone.`
-  const html = layout({
-    body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name || 'there')},</p>
-          <p style="margin:0 0 20px">Use this code to sign <b>${escapeHtml(contractName)}</b>:</p>
-          <div style="font-size:32px;font-weight:700;letter-spacing:10px;text-align:center;background:#f4f3fb;border-radius:10px;padding:16px 0;color:#1a1630">${code}</div>
-          <p style="margin:20px 0 0;color:#6d6887;font-size:13px">This code expires in ${minutes} minutes. Never share it with anyone.</p>`,
-  })
+  const message = buildOtpEmail({ name, code, purpose: 'signing', contractName, expiryMinutes: minutes })
   if (!transport) {
     console.log(`\n[mail:dev] SIGNING code for ${to}: ${code}  (expires in ${minutes} min)`)
     console.log(`[mail:dev] ${stamp()}  NOT SENT  no SMTP configured; the code above was not emailed to ${to}\n`)
     return
   }
-  await deliver('signing code', to, { subject: `${code} is your signing code`, text, html })
+  await deliver('signing code', to, message)
 }
 
 // Sends through SMTP, or prints a summary in the console when no SMTP server is configured.
@@ -176,33 +390,11 @@ async function send(kind, to, message, devLines) {
 }
 
 // Invitation with the signer's (or reviewer's) private link
-export async function sendSigningInvite({ to, name, contractName, orgName, senderName, link, expiresAt, subject, review = false, howToSign = '' }) {
-  const from = senderName ? `${senderName} (${orgName})` : orgName
-  const task = review ? 'review and approve before it is sent for signing' : 'review and sign electronically'
-  const verb = review ? 'respond' : 'sign'
-  const text = `Hi ${name},
-
-${from} has sent you "${contractName}" to ${task}.
-
-Open the document: ${link}
-${howToSign ? `\n${howToSign}\n` : ''}
-This link is personal to you; please don't forward it. Please ${verb} before ${formatDate(expiresAt)}.`
-  const html = layout({
-    body: `<p style="margin:0 0 12px">Hi ${escapeHtml(name)},</p>
-          <p style="margin:0 0 16px"><b>${escapeHtml(from)}</b> has sent you a document to ${task}.</p>
-          <div style="background:#f4f3fb;border-radius:10px;padding:14px 16px">
-            <div style="font-size:12px;color:#6d6887;text-transform:uppercase;letter-spacing:.05em">Document</div>
-            <div style="font-weight:700;font-size:16px">${escapeHtml(contractName)}</div>
-            <div style="font-size:13px;color:#6d6887;margin-top:4px">Please ${verb} before ${escapeHtml(formatDate(expiresAt))}</div>
-          </div>${howToSign ? `<p style="margin:14px 0 0;font-size:14px">${escapeHtml(howToSign)}</p>` : ''}`,
-    button: { label: review ? 'Review document' : 'Review & sign', href: link },
-    footer: 'This link is personal to you. Please do not forward this email.',
-  })
-  // The workflow's custom subject is written for signers, so reviewers get their own
-  const defaultSubject = review ? `Please review: ${contractName}` : `Please sign: ${contractName}`
-  return send(review ? 'review invite' : 'signing invite', to, { subject: (!review && subject) || defaultSubject, text, html }, [
-    `document: ${contractName}`,
-    `${review ? 'review' : 'signing'} link: ${link}`,
+export async function sendSigningInvite({ to, name, contractId, contractName, orgName, senderName, link, expiresAt, subject, review = false, howToSign = '' }) {
+  const message = buildSigningInviteEmail({ name, contractId, contractName, orgName, senderName, link, expiresAt, subject, review, howToSign })
+  return send(review ? 'review invite' : 'signing invite', to, message, [
+    `document: ${String(contractName ?? '').trim() || 'Untitled document'}`,
+    `${review ? 'review' : 'signing'} link: ${String(link ?? '').trim()}`,
   ])
 }
 

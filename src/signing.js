@@ -108,6 +108,7 @@ export async function inviteSigner(contractId, order, req, { reminder = false } 
     result.emailed = await sendSigningInvite({
       to: s.Email,
       name: s.Name,
+      contractId: c.Id,
       contractName: c.Name,
       orgName: c.OrgName,
       senderName: c.SenderName,
