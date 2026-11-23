@@ -135,7 +135,8 @@ const PHONE_RE =/^\+?[0-9]{8,15}$/
 // Checks the people entered for one kind of role; `label` is used in error messages
 function cleanPeople(list, roles, label) {
   const people = Array.isArray(list) ? list : []
-  if (people.length !== roles.length) throw badRequest(`This workflow needs exactly ${roles.length} ${label}(s)`)
+  if (people.length === 0 && roles.length > 0) throw badRequest(`This workflow needs at least 1 ${label}`)
+  if (people.length > roles.length) throw badRequest(`This workflow supports at most ${roles.length} ${label}(s)`)
   return people.map((p, i) => {
     const email = requireString(p?.email, `Email of ${label} ${i + 1}`, { max: 320 }).toLowerCase()
     if (!EMAIL_RE.test(email)) throw badRequest(`Enter a valid email for ${label} ${i + 1}`)
@@ -194,6 +195,14 @@ export async function createContract(
   const signerList = cleanPeople(signers, participants.filter((p) => p.kind === 'signer'), 'signer').map((s) => ({ ...s, kind: 'signer' }))
   const clean = [...reviewerList, ...signerList]
   if (new Set(clean.map((s) => s.email)).size !== clean.length) throw badRequest('Each reviewer and signer needs a different email address')
+  // A contract with nobody to sign it could never complete (and must never auto-complete)
+  if (signerList.length === 0) throw badRequest('A contract needs at least 1 signer')
+
+  // Only the roles that have an assigned person; unassigned trailing slots are excluded
+  const assignedRoleIds = new Set(clean.map((s) => s.roleId))
+  // Filter participants and boxes to the assigned roles (plus 'auto' boxes which belong to the org)
+  const assignedParticipants = participants.filter((p) => assignedRoleIds.has(String(p.id)) || p.kind === 'auto')
+  const assignedBoxes = boxes.filter((b) => assignedRoleIds.has(String(b.owner)) || participants.find((p) => p.id === b.owner)?.kind === 'auto')
 
   const title = name != null && String(name).trim() ? requireString(name, 'name') : (basic.contractName || wf.Name).slice(0, 200)
 const provided = externalRef != null && String(externalRef).trim()
@@ -226,8 +235,9 @@ if (provided) {
         now,
         expiresAt: computeExpiry(basic.expiryValue, basic.expiryUnit, now),
         signingMethod: wf.SigningMethod === 'parallel' ? 'parallel' : 'sequential',
-        participants: text(JSON.stringify(participants)),
-        boxes: text(JSON.stringify(boxes)),
+        // Store only the assigned roles/boxes, so unused template slots never become part of this contract
+        participants: text(JSON.stringify(assignedParticipants)),
+        boxes: text(JSON.stringify(assignedBoxes)),
         subject: basic.emailSubject ? String(basic.emailSubject).slice(0, 300) : null,
         source: source === 'api' ? 'api' : 'app',
         ref,
