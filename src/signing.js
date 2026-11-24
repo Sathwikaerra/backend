@@ -785,19 +785,16 @@ export async function buildAuditTrailPdf(contractId) {
     }
   }
 
-  // ---- layout constants ----
-  const padX = 8
-  const padY = 11
-  const minRow = 58
-  const headerHeight = 28
-  const soft = rgb(0.34, 0.34, 0.37) // muted grey-blue for secondary text
+  // ---- layout constants (card layout) ----
+  const padX = 10
+  const padY = 9
+  const cardHeaderH = 36
+  const cardGap = 12
+  const soft = rgb(0.34, 0.34, 0.37) // muted grey for secondary text
   const zebra = rgb(0.965, 0.965, 0.97)
-  const col = { sr: { x: left, w: 36 }, name: { x: 0, w: 142 }, date: { x: 0, w: 98 }, details: { x: 0, w: 0 } }
-  col.name.x = col.sr.x + col.sr.w
-  col.date.x = col.name.x + col.name.w
-  col.details.x = col.date.x + col.date.w
-  col.details.w = right - col.details.x
-  const dividers = [col.name.x, col.date.x, col.details.x]
+  const timelineW = 128
+  const sigW = 128
+  const zone = { time: { x: left, w: timelineW }, details: { x: left + timelineW, w: tableWidth - timelineW - sigW }, sig: { x: right - sigW, w: sigW } }
 
   const method = (p) => {
     const m = p.SignedMethod ?? p.Method
@@ -816,26 +813,6 @@ export async function buildAuditTrailPdf(contractId) {
   }
 
   // ---- cell items: each has a height and a draw(x, top) ----
-  const textItem = (value, fnt, size, color, width, leading, gap = 2) => {
-    const lines = wrapCell(value, fnt, size, width)
-    return {
-      height: lines.length * leading + gap,
-      draw: (x, top) => lines.forEach((line, i) => page.drawText(line, { x, y: top - size * 0.92 - i * leading, size, font: fnt, color })),
-    }
-  }
-  const chipItem = (text, bg, fg, maxWidth) => {
-    const label = safe(text).toUpperCase()
-    const width = bold.widthOfTextAtSize(label, 7) + 12
-    if (width > maxWidth) return textItem(text, bold, 7.6, fg, maxWidth, 9.6, 5)
-    return {
-      height: 14 + 6,
-      draw: (x, top) => {
-        page.drawRectangle({ x, y: top - 14, width, height: 14, color: bg, borderColor: rgb(0.07, 0.07, 0.07), borderWidth: 0.7 })
-        page.drawText(label, { x: x + 6, y: top - 10, size: 7, font: bold, color: fg })
-      },
-    }
-  }
-  // Small highlighted tag used for the bold headings inside the table (Invited, Viewed, Signed, Signature...).
   const drawTag = (label, x, top, bg, fg) => {
     const text = safe(label).toUpperCase()
     const width = bold.widthOfTextAtSize(text, 7.2) + 10
@@ -843,14 +820,12 @@ export async function buildAuditTrailPdf(contractId) {
     page.drawText(text, { x: x + 5, y: top - 9, size: 7.2, font: bold, color: fg })
     return width
   }
-  const stampColors = {}
   const stampItem = (label, value, width) => {
     const lines = wrapCell(value, font, 8.6, width)
-    const [bg, fg] = stampColors[label] ?? [headingBlue, brand]
     return {
       height: 12.5 + 4 + lines.length * 10.8 + 8,
       draw: (x, top) => {
-        drawTag(label, x, top, bg, fg)
+        drawTag(label, x, top, headingBlue, brand)
         lines.forEach((line, i) => page.drawText(line, { x, y: top - 12.5 - 4 - 7.6 - i * 10.8, size: 8.6, font, color: ink }))
       },
     }
@@ -884,36 +859,36 @@ export async function buildAuditTrailPdf(contractId) {
       cursor -= item.height
     }
   }
+  // Right-aligned chip drawn in the card header; returns its width so the next chip can sit to its left.
+  const drawHeaderChip = (text, bg, fg, rightX, top) => {
+    const label = safe(text).toUpperCase()
+    const width = bold.widthOfTextAtSize(label, 7) + 12
+    const x = rightX - width
+    page.drawRectangle({ x, y: top - 24, width, height: 14, color: bg, borderColor: rgb(0.07, 0.07, 0.07), borderWidth: 0.7 })
+    page.drawText(label, { x: x + 6, y: top - 20, size: 7, font: bold, color: fg })
+    return width
+  }
 
-  const records = participants.map((p) => {
+  // ---- build each participant card's content ----
+  const records = participants.map((p, index) => {
     const location = parseJson(p.LocationJson)
     const certificate = parseJson(p.VerificationJson)?.certificate
     const coords = location && available(location.lat) && available(location.lng)
       ? `${location.lat}, ${location.lng}${location.accuracy != null ? ` (accuracy ${location.accuracy} m)` : ''}`
       : null
-    const nameW = col.name.w - padX * 2
-    const dateW = col.date.w - padX * 2
-    const detailsW = col.details.w - padX * 2
+    const timeW = zone.time.w - padX * 2
+    const detailsW = zone.details.w - padX * 2
+    const sigInnerW = zone.sig.w - padX * 2 - 12
 
-    // Name & Contact: name (primary), email / phone (secondary), role chip.
-    const nameItems = []
-    if (available(p.Name)) nameItems.push(textItem(p.Name, bold, 10, ink, nameW, 12.5, 3))
-    if (available(p.Email)) nameItems.push(textItem(p.Email, font, 8.2, soft, nameW, 10.4, 2))
-    if (available(p.Phone)) nameItems.push(textItem(p.Phone, font, 8.2, soft, nameW, 10.4, 2))
-    if (available(p.role)) nameItems.push({ height: 5, spacer: true, draw: () => {} }, chipItem(p.role, headingBlue, brand, nameW))
-
-    // Date: small caps label over the value.
-    const dateItems = [
+    // Left: timeline.
+    const timeItems = [
       ['Invited', fullTimestamp(p.InvitedAt)],
       ['Viewed', fullTimestamp(p.ViewedAt)],
       [p.Kind === 'reviewer' ? 'Approved' : 'Signed', fullTimestamp(p.SignedAt)],
-    ].filter(([, v]) => available(v)).map(([l, v]) => stampItem(l, v, dateW))
+    ].filter(([, v]) => available(v)).map(([l, v]) => stampItem(l, v, timeW))
 
-    // Details: status badge, then a hanging label / value list, then photo and signature in framed boxes.
-    const detailItems = []
-    const st = status(p)
-    if (st) detailItems.push(chipItem(st, ...(statusColors[st] ?? [band, ink]), detailsW))
-    ;[
+    // Middle: verification, device and location as a label / value list.
+    const detailItems = [
       ['IP Address', p.SignedIp],
       ['Verification', p.Verification],
       ['Method', method(p)],
@@ -928,103 +903,52 @@ export async function buildAuditTrailPdf(contractId) {
       ['Cert. Issuer', certificate?.issuer],
       ['Cert. Serial', certificate?.serial],
       ['Cert. Valid Until', certificate?.validTo],
-    ].filter(([, v]) => available(v)).forEach(([l, v]) => detailItems.push(kvItem(l, v, detailsW)))
+    ].filter(([, v]) => available(v)).map(([l, v]) => kvItem(l, v, detailsW))
+
+    // Right: live photo and signature in framed boxes.
+    const sigItems = []
     const photo = photos.get(p.serial)
-    if (photo) detailItems.push({ height: 4, spacer: true, draw: () => {} }, imageItem('Live Photo', photo, fitImage(photo, 90, 50)))
+    if (photo) sigItems.push(imageItem('Live Photo', photo, fitImage(photo, Math.min(sigInnerW, 90), 50)))
     const signature = images.get(p.SignerOrder)
-    if (signature) detailItems.push({ height: 4, spacer: true, draw: () => {} }, imageItem('Signature', signature, fitImage(signature, Math.min(detailsW - 16, 170), 46)))
+    if (signature) sigItems.push(imageItem('Signature', signature, fitImage(signature, sigInnerW, 46)))
 
-    return { p, nameItems, dateItems, detailItems, index: 0 }
+    const bodyHeight = Math.max(stackHeight(timeItems), stackHeight(detailItems), stackHeight(sigItems))
+    return { p, index, timeItems, detailItems, sigItems, height: cardHeaderH + Math.max(bodyHeight + padY * 2, 40) }
   })
-  records.forEach((record, i) => { record.index = i })
 
-  const drawHeader = () => {
-    page.drawRectangle({ x: left, y: y - headerHeight, width: tableWidth, height: headerHeight, color: headingBlue, borderColor: gridColor, borderWidth: 0.6 })
-    dividers.forEach((x) => page.drawLine({ start: { x, y }, end: { x, y: y - headerHeight }, thickness: 0.5, color: gridColor }))
-    const baseline = y - 17.5
-    const srLabel = 'Sr. No.'
-    page.drawText(srLabel, { x: col.sr.x + (col.sr.w - bold.widthOfTextAtSize(srLabel, 8)) / 2, y: baseline, size: 8, font: bold, color: brand })
-    page.drawText('Name & Contact', { x: col.name.x + padX, y: baseline, size: 9.5, font: bold, color: brand })
-    page.drawText('Date', { x: col.date.x + padX, y: baseline, size: 9.5, font: bold, color: brand })
-    page.drawText('Details', { x: col.details.x + padX, y: baseline, size: 9.5, font: bold, color: brand })
-    y -= headerHeight
-    page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 1.2, color: rgb(0.07, 0.07, 0.07) })
-  }
-  // Draws one slice of a participant row. A participant that does not fit in the space left on a page
-  // continues on the next page (with the header repeated), so pages are filled and no blank gaps are left.
-  const drawPart = (record, parts, continued) => {
+  const drawCard = (record) => {
+    const { p, index, height } = record
     const top = y
-    const contentHeight = Math.max(stackHeight(parts.name), stackHeight(parts.date), stackHeight(parts.details))
-    const height = Math.max(continued ? 40 : minRow, contentHeight + padY * 2)
-    const rowBottom = top - height
-    if (record.index % 2 === 1) page.drawRectangle({ x: left, y: rowBottom, width: tableWidth, height, color: zebra })
-    // Outer border, column dividers and a rule under every row.
-    page.drawLine({ start: { x: left, y: rowBottom }, end: { x: right, y: rowBottom }, thickness: 0.5, color: gridColor })
-    page.drawLine({ start: { x: left, y: top }, end: { x: left, y: rowBottom }, thickness: 0.6, color: gridColor })
-    page.drawLine({ start: { x: right, y: top }, end: { x: right, y: rowBottom }, thickness: 0.6, color: gridColor })
-    dividers.forEach((x) => page.drawLine({ start: { x, y: top }, end: { x, y: rowBottom }, thickness: 0.5, color: gridColor }))
-    // Serial number badge.
-    const cx = col.sr.x + col.sr.w / 2
-    page.drawCircle({ x: cx, y: top - padY - 9, size: 9.5, color: headingBlue, borderColor: gridColor, borderWidth: 0.6 })
-    const num = String(record.p.serial)
-    page.drawText(num, { x: cx - bold.widthOfTextAtSize(num, 8.5) / 2, y: top - padY - 12, size: 8.5, font: bold, color: brand })
-    // All columns are top-aligned so every row reads straight across.
-    drawStack(parts.name, col.name.x + padX, top - padY)
-    drawStack(parts.date, col.date.x + padX, top - padY)
-    drawStack(parts.details, col.details.x + padX, top - padY)
-    y = rowBottom
+    const bodyTop = top - cardHeaderH
+    const cardBottom = top - height
+    // Header band: serial badge, name, contact line, role and status chips.
+    page.drawRectangle({ x: left, y: bodyTop, width: tableWidth, height: cardHeaderH, color: headingBlue })
+    if (index % 2 === 1) page.drawRectangle({ x: left, y: cardBottom, width: tableWidth, height: height - cardHeaderH, color: zebra })
+    page.drawCircle({ x: left + 18, y: top - cardHeaderH / 2, size: 9.5, color: rgb(1, 1, 1), borderColor: gridColor, borderWidth: 0.6 })
+    const num = String(p.serial)
+    page.drawText(num, { x: left + 18 - bold.widthOfTextAtSize(num, 8.5) / 2, y: top - cardHeaderH / 2 - 3, size: 8.5, font: bold, color: brand })
+    let chipRight = right - 8
+    const st = status(p)
+    if (st) chipRight -= drawHeaderChip(st, ...(statusColors[st] ?? [band, ink]), chipRight, top - 4) + 5
+    if (available(p.role)) drawHeaderChip(p.role, rgb(1, 1, 1), brand, chipRight, top - 4)
+    const nameX = left + 36
+    if (available(p.Name)) page.drawText(safe(p.Name), { x: nameX, y: top - 15, size: 10.5, font: bold, color: ink, maxWidth: chipRight - nameX - 150 })
+    const contact = [p.Email, p.Phone].filter(available).join('  |  ')
+    if (contact) page.drawText(safe(contact), { x: nameX, y: top - 28, size: 8.2, font, color: soft })
+    // Frame, column dividers, body content.
+    page.drawRectangle({ x: left, y: cardBottom, width: tableWidth, height, borderColor: gridColor, borderWidth: 0.7 })
+    page.drawLine({ start: { x: left, y: bodyTop }, end: { x: right, y: bodyTop }, thickness: 1.2, color: rgb(0.07, 0.07, 0.07) })
+    ;[zone.details.x, zone.sig.x].forEach((x) => page.drawLine({ start: { x, y: bodyTop }, end: { x, y: cardBottom }, thickness: 0.5, color: gridColor }))
+    drawStack(record.timeItems, zone.time.x + padX, bodyTop - padY)
+    drawStack(record.detailItems, zone.details.x + padX, bodyTop - padY)
+    drawStack(record.sigItems, zone.sig.x + padX, bodyTop - padY)
+    y = cardBottom - cardGap
   }
 
-  let freshPage = false
-  const startNewTablePage = () => {
-    newPage()
-    drawHeader()
-    freshPage = true
-  }
-  // The table starts straight after the About band whenever a useful part of the first row fits.
-  if (y - headerHeight - 130 < bottom) newPage()
-  drawHeader()
-
+  // A card is never split across pages: if it does not fit, it moves whole to the next page.
   for (const record of records) {
-    const rest = { name: record.nameItems, date: record.dateItems, details: record.detailItems }
-    let continued = false
-    const remaining = () => rest.name.length + rest.date.length + rest.details.length
-    while (remaining() > 0) {
-      const avail = y - bottom - padY * 2
-      const fits = (items) => {
-        let used = 0
-        let n = 0
-        while (n < items.length && used + items[n].height <= avail) {
-          used += items[n].height
-          n += 1
-        }
-        return n
-      }
-      let counts = [fits(rest.name), fits(rest.date), fits(rest.details)]
-      const all = [rest.name, rest.date, rest.details]
-      const everythingFits = counts.every((n, i) => n === all[i].length)
-      const nothingFits = counts.every((n, i) => n === 0 || all[i][0]?.spacer)
-      // Not worth starting a row in a sliver of space: move to the next page (a small gap at most).
-      const sliver = !continued && !everythingFits && avail < 70
-      if ((nothingFits || sliver || y - Math.max(continued ? 40 : minRow, padY * 2 + 20) < bottom) && !freshPage) {
-        startNewTablePage()
-        continue
-      }
-      if (nothingFits) counts = all.map((items) => Math.min(1, items.length)) // item taller than a page: force it
-      const parts = {
-        name: rest.name.slice(0, counts[0]),
-        date: rest.date.slice(0, counts[1]),
-        details: rest.details.slice(0, counts[2]),
-      }
-      rest.name = rest.name.slice(counts[0])
-      rest.date = rest.date.slice(counts[1])
-      rest.details = rest.details.slice(counts[2])
-      for (const key of ['name', 'date', 'details']) while (rest[key][0]?.spacer) rest[key].shift()
-      if (continued && available(record.p.Name)) parts.name.unshift(textItem(`${record.p.Name} (continued)`, bold, 8.6, ink, col.name.w - padX * 2, 10.8, 3))
-      drawPart(record, parts, continued)
-      freshPage = false
-      if (remaining() > 0) continued = true
-    }
+    if (y - record.height < bottom) newPage()
+    drawCard(record)
   }
 
   pages.forEach((pdfPage, index) => {
